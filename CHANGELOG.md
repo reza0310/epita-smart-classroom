@@ -32,3 +32,11 @@
 - Ajout d’un bouton d’import d’image directement dans l’onglet d’apprentissage.
 - Fusion de la configuration initiale et des objets en vue dans un panneau compact, par catégorie : attendu, détecté ou relevé manuellement.
 - Réduction de l’encombrement des indicateurs lors de l’annotation et ajustements responsive pour mobile.
+
+
+## Correctif de déploiement Cloudflare Pages
+
+- Documentation clarifiée : le projet doit être déployé comme **Cloudflare Pages** (build `npm run build`, sortie `dist`), et non comme Worker autonome via `wrangler deploy`.
+- Ajout du script facultatif `npm run pages:deploy` pour lancer un build puis `wrangler pages deploy dist`. Pour les dépôts Git connectés à Pages, laisser le déploiement automatique de Pages gérer l'étape de publication.
+- Vérification syntaxique locale de `vite.config.js` avec `node --check` : aucune erreur de syntaxe JavaScript détectée.
+- La compilation Vite complète reste à vérifier dans un environnement où les dépendances npm peuvent être installées.

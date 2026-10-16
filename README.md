@@ -33,13 +33,36 @@ npm run build
 npm run preview
 ```
 
-## Déploiement Cloudflare Pages
+## Déploiement Cloudflare Pages — important
 
-1. Envoyer ce projet dans un dépôt Git.
-2. Créer un projet Pages et connecter le dépôt.
-3. Commande de build : `npm run build` ; répertoire de sortie : `dist`.
-4. Déployer. La présence du dossier `functions/api/hf/` est obligatoire pour que les modèles secondaires fonctionnent en production : utilisez une intégration Git ou Wrangler qui déploie aussi les Pages Functions (un simple téléversement du dossier `dist` ne suffit pas).
-5. Après déploiement, ouvrir `https://<votre-domaine>/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais peut joindre Hugging Face. Une réponse 404 indique généralement que la Pages Function n'a pas été déployée ; une réponse 502 indique un problème de sortie réseau du relais.
+Ce dépôt est une **application Cloudflare Pages avec Vite et Pages Functions**. Il ne s'agit pas d'un Worker Vite autonome. Le message Wrangler `Error parsing file: .../vite.config.js` apparaît souvent lorsque le dépôt est lancé avec la commande de déploiement Workers `wrangler deploy` au lieu du flux Pages. Le fichier a été vérifié avec `node --check vite.config.js` : sa syntaxe JavaScript est valide dans cet environnement. Il faut corriger la cible/la commande de déploiement, pas renommer `vite.config.js`.
+
+### Si le dépôt est connecté dans le tableau de bord Cloudflare Pages
+
+Dans **Workers & Pages → votre projet Pages → Settings → Builds & deployments**, régler :
+
+- **Framework preset** : `Vite` (ou `None` si le preset Vite n'est pas proposé) ;
+- **Build command** : `npm run build` ;
+- **Build output directory** : `dist` ;
+- **Root directory** : `/` (la racine de ce dépôt).
+
+Laisser Pages effectuer lui-même le déploiement après le build. Ne pas renseigner `wrangler deploy` comme commande de build/déploiement pour ce projet. La fonction `functions/api/hf/[[path]].js` doit rester à la racine du dépôt : Pages la déploie avec le site via l'intégration Git.
+
+### Si le déploiement est fait manuellement avec Wrangler
+
+Utiliser la commande **Pages**, et non celle des Workers :
+
+```bash
+npm install
+npm run build
+npx wrangler pages deploy dist --project-name NOM_DU_PROJET_PAGES
+```
+
+Remplacer `NOM_DU_PROJET_PAGES` par le nom exact du projet Pages existant. La commande `npm run pages:deploy` est aussi disponible si Wrangler est authentifié et que le nom du projet peut être sélectionné par l'outil.
+
+### Contrôle après déploiement
+
+Ouvrir `https://<votre-domaine>/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais peut joindre Hugging Face. Une réponse 404 indique généralement que la Pages Function n'a pas été déployée ; une réponse 502 indique un problème de sortie réseau du relais.
 
 ## Classes détectées et limites
 
