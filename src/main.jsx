@@ -58,6 +58,9 @@ const OWL_PROMPTS = [
   { prompt: 'a table in a room', categoryId: 'table' },
 ];
 const OWL_CATEGORY_IDS = new Set(OWL_IDS);
+const OWL_MODEL_ID = 'Xenova/owlvit-base-patch32';
+const DENSE_MODEL_ID = 'onnx-community/yolov10n';
+const DENSE_CLASS_TO_CATEGORY = { chair: 'chair', 'dining table': 'table', laptop: 'laptop', tv: 'screen' };
 const INITIAL_EXPECTED = Object.fromEntries(CATEGORIES.map((category) => [category.id, category.expectedDefault]));
 const EMPTY_MANUAL = { board: '', window: '', anomaly: '' };
 const EMPTY_COUNTS = Object.fromEntries(CATEGORIES.map((category) => [category.id, 0]));
@@ -254,6 +257,22 @@ function loadImageElement(src) {
   });
 }
 
+// Réduit les très grandes images avant les modèles Transformers.js pour limiter
+// les allocations de mémoire sur mobile. Les cadres sont ensuite reprojetés à l'échelle source.
+function fitCanvasForInference(sourceCanvas, maxDimension = 1280) {
+  const sourceWidth = sourceCanvas.width;
+  const sourceHeight = sourceCanvas.height;
+  const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+  if (scale >= 1) return { canvas: sourceCanvas, scaleX: 1, scaleY: 1 };
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Impossible de préparer une image réduite pour le modèle.');
+  context.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
+  return { canvas, scaleX: sourceWidth / canvas.width, scaleY: sourceHeight / canvas.height };
+}
+
 const LEARNABLE_CATEGORIES = CATEGORIES.map((category) => ({
   id: category.id,
   label: category.label,
@@ -271,8 +290,16 @@ function App() {
   const modelRef = useRef(null);
   const owlModelRef = useRef(null);
   const owlLoadPromiseRef = useRef(null);
+  const denseModelRef = useRef(null);
+  const denseLoadPromiseRef = useRef(null);
+  const transformersModuleRef = useRef(null);
+  const owlVideoPredictionsRef = useRef([]);
+  const denseVideoPredictionsRef = useRef([]);
+  const lastOwlVideoRunAtRef = useRef(0);
+  const lastDenseVideoRunAtRef = useRef(0);
   const owlThresholdRef = useRef(0.12);
   const busyRef = useRef(false);
+  const enhancedBusyRef = useRef(false);
   const thresholdRef = useRef(0.55);
   const [stream, setStream] = useState(null);
   const [cameraOn, setCameraOn] = useState(false);
@@ -283,6 +310,12 @@ function App() {
   const [owlModelError, setOwlModelError] = useState('');
   const [owlProgress, setOwlProgress] = useState(0);
   const [owlEnabled, setOwlEnabled] = useState(false);
+  const [owlVideoEnabled, setOwlVideoEnabled] = useState(false);
+  const [denseSceneEnabled, setDenseSceneEnabled] = useState(false);
+  const [denseVideoEnabled, setDenseVideoEnabled] = useState(false);
+  const [denseModelStatus, setDenseModelStatus] = useState('idle');
+  const [denseModelError, setDenseModelError] = useState('');
+  const [denseProgress, setDenseProgress] = useState(0);
   const [owlThreshold, setOwlThreshold] = useState(0.12);
   const [owlObserved, setOwlObserved] = useState(false);
   const [imageOwlObserved, setImageOwlObserved] = useState(false);
@@ -339,6 +372,10 @@ function App() {
     setStream(null);
     setCameraOn(false);
     setCameraError('');
+    owlVideoPredictionsRef.current = [];
+    denseVideoPredictionsRef.current = [];
+    lastOwlVideoRunAtRef.current = 0;
+    lastDenseVideoRunAtRef.current = 0;
     setNotice('Caméra arrêtée. Le dernier relevé reste disponible pour consultation.');
     if (videoRef.current) videoRef.current.srcObject = null;
   }, [stream]);
@@ -365,6 +402,25 @@ function App() {
     await loadDetectionModel();
   };
 
+  const getTransformersModule = async () => {
+    if (transformersModuleRef.current) return transformersModuleRef.current;
+    const module = await import('@huggingface/transformers');
+    // En application navigateur, les modèles sont récupérés depuis Hugging Face et
+    // le cache navigateur est autorisé. Aucun serveur applicatif ne reçoit les images.
+    module.env.allowLocalModels = false;
+    module.env.allowRemoteModels = true;
+    module.env.useBrowserCache = true;
+    // Le mono-thread WASM évite des pannes de Worker / SharedArrayBuffer sur certains navigateurs mobiles.
+    if (module.env.backends?.onnx?.wasm) module.env.backends.onnx.wasm.numThreads = 1;
+    transformersModuleRef.current = module;
+    return module;
+  };
+
+  const friendlyModelError = (error, modelName) => {
+    const detail = String(error?.message || error || 'Erreur inconnue').replace(/\s+/g, ' ').slice(0, 360);
+    return `${modelName} n’a pas pu être chargé ou exécuté. Vérifiez la connexion, l’espace mémoire disponible et le chargement des fichiers du modèle. Détail : ${detail}`;
+  };
+
   const loadOwlModel = async () => {
     if (owlModelRef.current) return owlModelRef.current;
     if (owlLoadPromiseRef.current) return owlLoadPromiseRef.current;
@@ -373,14 +429,17 @@ function App() {
     setOwlProgress(0);
     owlLoadPromiseRef.current = (async () => {
       try {
-        const { pipeline, env } = await import('@huggingface/transformers');
-        // Ce modèle n'est chargé que si l'utilisateur demande OWL-ViT pour une image fixe.
-        env.allowLocalModels = false;
-        const detector = await pipeline('zero-shot-object-detection', 'Xenova/owlvit-base-patch32', {
+        const { pipeline } = await getTransformersModule();
+        // Le modèle ONNX q8 est le compromis par défaut pour WASM / navigateur mobile.
+        const detector = await pipeline('zero-shot-object-detection', OWL_MODEL_ID, {
+          // Force le backend navigateur/WASM (pas de backend Node ni de GPU supposé).
+          device: 'wasm',
           dtype: 'q8',
           progress_callback: (progress) => {
             if (progress?.status === 'progress' && Number.isFinite(progress.progress)) {
               setOwlProgress(Math.max(0, Math.min(100, Math.round(progress.progress))));
+            } else if (progress?.status === 'initiate') {
+              setOwlProgress(0);
             }
           },
         });
@@ -391,7 +450,7 @@ function App() {
       } catch (error) {
         console.error('OWL-ViT load error', error);
         setOwlModelStatus('error');
-        setOwlModelError('OWL-ViT n’a pas pu être téléchargé ou initialisé. Vérifiez la connexion et réessayez.');
+        setOwlModelError(friendlyModelError(error, 'OWL-ViT'));
         throw error;
       } finally {
         owlLoadPromiseRef.current = null;
@@ -400,32 +459,136 @@ function App() {
     return owlLoadPromiseRef.current;
   };
 
+  const loadDenseModel = async () => {
+    if (denseModelRef.current) return denseModelRef.current;
+    if (denseLoadPromiseRef.current) return denseLoadPromiseRef.current;
+    setDenseModelStatus('loading');
+    setDenseModelError('');
+    setDenseProgress(0);
+    denseLoadPromiseRef.current = (async () => {
+      try {
+        const { pipeline } = await getTransformersModule();
+        const detector = await pipeline('object-detection', DENSE_MODEL_ID, {
+          device: 'wasm',
+          dtype: 'q8',
+          progress_callback: (progress) => {
+            if (progress?.status === 'progress' && Number.isFinite(progress.progress)) {
+              setDenseProgress(Math.max(0, Math.min(100, Math.round(progress.progress))));
+            } else if (progress?.status === 'initiate') {
+              setDenseProgress(0);
+            }
+          },
+        });
+        denseModelRef.current = detector;
+        setDenseModelStatus('ready');
+        setDenseProgress(100);
+        return detector;
+      } catch (error) {
+        console.error('YOLOv10n load error', error);
+        setDenseModelStatus('error');
+        setDenseModelError(friendlyModelError(error, 'YOLOv10n'));
+        throw error;
+      } finally {
+        denseLoadPromiseRef.current = null;
+      }
+    })();
+    return denseLoadPromiseRef.current;
+  };
+
   const detectWithOwl = async (canvas) => {
     const detector = await loadOwlModel();
-    const outputs = await detector(canvas, OWL_PROMPTS.map((item) => item.prompt), {
+    const fitted = fitCanvasForInference(canvas, 1280);
+    const outputs = await detector(fitted.canvas, OWL_PROMPTS.map((item) => item.prompt), {
       threshold: owlThresholdRef.current,
-      top_k: 40,
+      top_k: 80,
     });
     return outputs.map((prediction, index) => {
       const prompt = OWL_PROMPTS.find((item) => item.prompt === prediction.label);
       if (!prompt) return null;
       const category = CATEGORIES.find((item) => item.id === prompt.categoryId);
       const box = prediction.box || {};
-      const xmin = Math.max(0, Math.min(canvas.width, Number(box.xmin) || 0));
-      const ymin = Math.max(0, Math.min(canvas.height, Number(box.ymin) || 0));
-      const xmax = Math.max(xmin, Math.min(canvas.width, Number(box.xmax) || 0));
-      const ymax = Math.max(ymin, Math.min(canvas.height, Number(box.ymax) || 0));
+      const xmin = Math.max(0, Math.min(fitted.canvas.width, Number(box.xmin) || 0));
+      const ymin = Math.max(0, Math.min(fitted.canvas.height, Number(box.ymin) || 0));
+      const xmax = Math.max(xmin, Math.min(fitted.canvas.width, Number(box.xmax) || 0));
+      const ymax = Math.max(ymin, Math.min(fitted.canvas.height, Number(box.ymax) || 0));
       if (xmax - xmin < 4 || ymax - ymin < 4) return null;
       return {
-        id: `owl-${prompt.categoryId}-${index}`,
+        id: `owl-${prompt.categoryId}-${index}-${Date.now()}`,
         categoryId: prompt.categoryId,
         label: category.label,
         color: category.color,
         score: Number(prediction.score) || 0,
-        bbox: [xmin, ymin, xmax - xmin, ymax - ymin],
+        bbox: [xmin * fitted.scaleX, ymin * fitted.scaleY, (xmax - xmin) * fitted.scaleX, (ymax - ymin) * fitted.scaleY],
         source: 'OWL-ViT',
       };
     }).filter(Boolean);
+  };
+
+  const detectWithDenseModel = async (canvas) => {
+    const detector = await loadDenseModel();
+    const fitted = fitCanvasForInference(canvas, 1280);
+    // Même chemin d'entrée que l'API officielle : le pipeline accepte le canvas.
+    const outputs = await detector(fitted.canvas, {
+      threshold: Math.min(0.85, Math.max(0.12, thresholdRef.current - 0.08)),
+      percentage: false,
+    });
+    return (Array.isArray(outputs) ? outputs : []).map((prediction, index) => {
+      const categoryId = DENSE_CLASS_TO_CATEGORY[String(prediction.label || '').toLowerCase().trim()];
+      if (!categoryId) return null;
+      const category = CATEGORIES.find((item) => item.id === categoryId);
+      const box = prediction.box || {};
+      const xmin = Math.max(0, Math.min(fitted.canvas.width, Number(box.xmin) || 0));
+      const ymin = Math.max(0, Math.min(fitted.canvas.height, Number(box.ymin) || 0));
+      const xmax = Math.max(xmin, Math.min(fitted.canvas.width, Number(box.xmax) || 0));
+      const ymax = Math.max(ymin, Math.min(fitted.canvas.height, Number(box.ymax) || 0));
+      if (xmax - xmin < 3 || ymax - ymin < 3) return null;
+      return {
+        id: `yolo-${categoryId}-${index}-${Date.now()}`,
+        categoryId,
+        label: category.label,
+        color: category.color,
+        score: Number(prediction.score) || 0,
+        bbox: [xmin * fitted.scaleX, ymin * fitted.scaleY, (xmax - xmin) * fitted.scaleX, (ymax - ymin) * fitted.scaleY],
+        source: 'YOLOv10n',
+      };
+    }).filter((item) => item && item.score >= Math.min(0.85, Math.max(0.12, thresholdRef.current - 0.08)));
+  };
+
+  const detectCocoTiled = async (image) => {
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    const tileWidth = Math.min(width, Math.max(320, Math.ceil(width * 0.62)));
+    const tileHeight = Math.min(height, Math.max(320, Math.ceil(height * 0.62)));
+    const startsX = [...new Set([0, Math.max(0, width - tileWidth)])];
+    const startsY = [...new Set([0, Math.max(0, height - tileHeight)])];
+    const detections = [];
+    let tileIndex = 0;
+    for (const top of startsY) {
+      for (const left of startsX) {
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = tileWidth;
+        tileCanvas.height = tileHeight;
+        const context = tileCanvas.getContext('2d');
+        if (!context) continue;
+        context.drawImage(image, left, top, tileWidth, tileHeight, 0, 0, tileWidth, tileHeight);
+        const predictions = await modelRef.current.detect(tileCanvas, 40, thresholdRef.current);
+        predictions.forEach((prediction, index) => {
+          const category = CATEGORIES.find((item) => item.modelClass === prediction.class && AUTO_IDS.includes(item.id));
+          if (!category) return;
+          detections.push({
+            id: `coco-tile-${tileIndex}-${prediction.class}-${index}`,
+            categoryId: category.id,
+            label: category.label,
+            color: category.color,
+            score: prediction.score,
+            bbox: [prediction.bbox[0] + left, prediction.bbox[1] + top, prediction.bbox[2], prediction.bbox[3]],
+            source: 'COCO-SSD · zones',
+          });
+        });
+        tileIndex += 1;
+      }
+    }
+    return detections;
   };
 
   const boxIoU = (boxA, boxB) => {
@@ -509,10 +672,10 @@ function App() {
     setDatasetBusy(true);
     setModelError('');
     setOwlModelError('');
+    setDenseModelError('');
     try {
       const image = await loadImageElement(selectedImage.dataUrl);
-      // COCO-SSD is multi-class; this application only keeps its authorized equipment classes.
-      const predictions = await modelRef.current.detect(image, 40, thresholdRef.current);
+      const predictions = await modelRef.current.detect(image, 80, thresholdRef.current);
       const cocoEquipment = predictions
         .filter((prediction) => AUTO_IDS.some((id) => CATEGORIES.find((category) => category.id === id)?.modelClass === prediction.class))
         .map((prediction, index) => {
@@ -528,24 +691,45 @@ function App() {
           };
         });
 
+      const canvas = document.createElement('canvas');
+      canvas.width = selectedImage.width;
+      canvas.height = selectedImage.height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Le navigateur ne peut pas préparer l’image pour l’analyse complémentaire.');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
       let owlEquipment = [];
       let owlSucceeded = false;
       if (owlEnabled) {
         try {
-          const canvas = document.createElement('canvas');
-          canvas.width = selectedImage.width;
-          canvas.height = selectedImage.height;
-          const context = canvas.getContext('2d');
-          if (!context) throw new Error('Le navigateur ne peut pas préparer l’image pour OWL-ViT.');
-          context.drawImage(image, 0, 0, canvas.width, canvas.height);
           owlEquipment = await detectWithOwl(canvas);
           owlSucceeded = true;
         } catch (owlError) {
           console.error('OWL-ViT image detection error', owlError);
-          // Keep COCO-SSD results usable even when the optional larger model fails.
         }
       }
-      const equipment = suppressDuplicateBoxes([...cocoEquipment, ...owlEquipment]);
+
+      let denseEquipment = [];
+      let tileEquipment = [];
+      let denseSucceeded = false;
+      if (denseSceneEnabled) {
+        try {
+          denseEquipment = await detectWithDenseModel(canvas);
+          denseSucceeded = true;
+        } catch (denseError) {
+          console.error('YOLOv10n image detection error', denseError);
+        }
+        try {
+          // Pour les petits objets éloignés, une seconde passe COCO-SSD sur quatre
+          // zones agrandit l’objet dans l’entrée du modèle. Les recouvrements seront dédoublonnés.
+          tileEquipment = await detectCocoTiled(image);
+          denseSucceeded = true;
+        } catch (tileError) {
+          console.error('COCO-SSD tiled inference error', tileError);
+        }
+      }
+
+      const equipment = suppressDuplicateBoxes([...cocoEquipment, ...tileEquipment, ...denseEquipment, ...owlEquipment]);
       const nextCounts = { ...EMPTY_COUNTS };
       equipment.forEach((object) => { nextCounts[object.categoryId] = (nextCounts[object.categoryId] || 0) + 1; });
       setImagePredictions(equipment);
@@ -556,14 +740,14 @@ function App() {
       setImageOwlObserved(owlSucceeded);
       setImageAnalyzed(true);
       setLastInferenceAt(new Date().toISOString());
-      if (owlEnabled && !owlSucceeded) {
-        setNotice(`COCO-SSD : ${cocoEquipment.length} détection(s). OWL-ViT n’a pas pu aboutir ; les tableaux et fenêtres restent à confirmer manuellement.`);
-      } else {
-        setNotice(`${equipment.length} détection(s) sur l’image fixe${owlSucceeded ? ' avec fusion COCO-SSD + OWL-ViT' : ' avec COCO-SSD'}. Confirmez les cadres, surtout pour les tableaux, fenêtres et bureaux.`);
-      }
+      const modelNames = ['COCO-SSD', ...(denseSucceeded ? ['YOLOv10n + analyse par zones'] : []), ...(owlSucceeded ? ['OWL-ViT'] : [])];
+      const notes = [];
+      if (owlEnabled && !owlSucceeded) notes.push('OWL-ViT indisponible pour cette analyse ; tableaux et fenêtres à confirmer manuellement.');
+      if (denseSceneEnabled && !denseSucceeded) notes.push('Le mode scènes denses n’a pas abouti ; les résultats COCO-SSD restent affichés.');
+      setNotice(`${equipment.length} détection(s) sur l’image fixe · ${modelNames.join(' + ')}. ${notes.join(' ')} Vérifiez les cadres et les éventuels doublons avant validation.`);
     } catch (error) {
       console.error('Fixed-image detection error', error);
-      setModelError('La détection sur cette image a échoué. Essayez une image moins volumineuse ou un autre format.');
+      setModelError(friendlyModelError(error, 'Analyse de l’image'));
     } finally {
       setDatasetBusy(false);
     }
@@ -808,16 +992,16 @@ function App() {
     if (!cameraOn || !model) return undefined;
     let cancelled = false;
     let timerId;
+    if (!owlVideoEnabled) owlVideoPredictionsRef.current = [];
+    if (!denseVideoEnabled) denseVideoPredictionsRef.current = [];
     const detectFrame = async () => {
       const video = videoRef.current;
       if (!cancelled && video && video.readyState >= 2 && !busyRef.current) {
         busyRef.current = true;
         try {
-          const predictions = await model.detect(video, 20, thresholdRef.current);
+          const predictions = await model.detect(video, 80, thresholdRef.current);
           if (cancelled) return;
-          // Ne conserver que les catégories d'équipement autorisées. La sortie "person"
-          // ainsi que toutes les autres classes sont ignorées et ne sont pas journalisées.
-          const equipment = predictions
+          const cocoEquipment = predictions
             .filter((prediction) => AUTO_IDS.some((id) => CATEGORIES.find((c) => c.id === id)?.modelClass === prediction.class))
             .map((prediction, index) => {
               const category = CATEGORIES.find((item) => item.modelClass === prediction.class);
@@ -828,8 +1012,61 @@ function App() {
                 color: category.color,
                 score: prediction.score,
                 bbox: prediction.bbox,
+                source: 'COCO-SSD',
               };
             });
+
+          const now = Date.now();
+          const shouldRunOwl = owlVideoEnabled && owlModelRef.current && now - lastOwlVideoRunAtRef.current >= 6500;
+          const shouldRunDense = denseVideoEnabled && denseModelRef.current && now - lastDenseVideoRunAtRef.current >= 4500;
+          if (!enhancedBusyRef.current && (shouldRunOwl || shouldRunDense)) {
+            const width = video.videoWidth || 1280;
+            const height = video.videoHeight || 720;
+            const frameCanvas = document.createElement('canvas');
+            frameCanvas.width = width;
+            frameCanvas.height = height;
+            const context = frameCanvas.getContext('2d');
+            if (context) {
+              context.drawImage(video, 0, 0, width, height);
+              enhancedBusyRef.current = true;
+              if (shouldRunOwl) {
+                lastOwlVideoRunAtRef.current = now;
+                detectWithOwl(frameCanvas)
+                  .then((items) => {
+                    owlVideoPredictionsRef.current = items;
+                    setOwlObserved(true);
+                    setOwlModelStatus('ready');
+                  })
+                  .catch((owlError) => {
+                    console.error('OWL-ViT live detection error', owlError);
+                    setOwlModelError(friendlyModelError(owlError, 'OWL-ViT en vidéo'));
+                    lastOwlVideoRunAtRef.current = Number.MAX_SAFE_INTEGER;
+                  })
+                  .finally(() => { enhancedBusyRef.current = false; });
+              } else if (shouldRunDense) {
+                lastDenseVideoRunAtRef.current = now;
+                detectWithDenseModel(frameCanvas)
+                  .then((items) => {
+                    denseVideoPredictionsRef.current = items;
+                    setDenseModelStatus('ready');
+                  })
+                  .catch((denseError) => {
+                    console.error('YOLOv10n live detection error', denseError);
+                    setDenseModelError(friendlyModelError(denseError, 'YOLOv10n en vidéo'));
+                    lastDenseVideoRunAtRef.current = Number.MAX_SAFE_INTEGER;
+                  })
+                  .finally(() => { enhancedBusyRef.current = false; });
+              } else {
+                enhancedBusyRef.current = false;
+              }
+            }
+          }
+
+          const equipment = suppressDuplicateBoxes([
+            ...cocoEquipment,
+            ...(owlVideoEnabled ? owlVideoPredictionsRef.current : []),
+            ...(denseVideoEnabled ? denseVideoPredictionsRef.current : []),
+          ]);
           const nextCounts = { ...EMPTY_COUNTS };
           equipment.forEach((object) => { nextCounts[object.categoryId] += 1; });
           setObjects(equipment);
@@ -850,7 +1087,7 @@ function App() {
       cancelled = true;
       window.clearTimeout(timerId);
     };
-  }, [cameraOn, model]);
+  }, [cameraOn, model, owlVideoEnabled, denseVideoEnabled]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -942,7 +1179,7 @@ function App() {
       owlObserved,
       owlThreshold,
       threshold,
-      model: owlObserved ? 'COCO-SSD + OWL-ViT · owlvit-base-patch32' : 'COCO-SSD · lite_mobilenet_v2',
+      model: ['COCO-SSD · lite_mobilenet_v2', ...(objects.some((object) => object.source === 'YOLOv10n' || object.source === 'COCO-SSD · zones') ? ['YOLOv10n + COCO-SSD par zones'] : []), ...(owlObserved ? ['OWL-ViT · owlvit-base-patch32'] : [])].join(' + '),
       source: sourceMode === 'image' ? `Image fixe : ${selectedImage?.name || 'image importée'}` : 'Caméra / dernière image vidéo',
     };
     setAuditSnapshot(snapshot);
@@ -957,7 +1194,7 @@ function App() {
       application: 'Atlas — Audit visuel',
       generatedAt: new Date().toISOString(),
       auditCapturedAt: auditSnapshot?.createdAt || null,
-      model: auditSnapshot?.model || (owlObserved ? 'COCO-SSD + OWL-ViT · owlvit-base-patch32' : 'COCO-SSD · lite_mobilenet_v2'),
+      model: auditSnapshot?.model || ['COCO-SSD · lite_mobilenet_v2', ...(objects.some((object) => object.source === 'YOLOv10n' || object.source === 'COCO-SSD · zones') ? ['YOLOv10n + COCO-SSD par zones'] : []), ...(owlObserved ? ['OWL-ViT · owlvit-base-patch32'] : [])].join(' + '),
       confidenceThreshold: auditSnapshot?.threshold ?? threshold,
       owlConfidenceThreshold: auditSnapshot?.owlThreshold ?? (owlObserved ? owlThreshold : null),
       globalStatus: summary.status,
@@ -1080,8 +1317,43 @@ function App() {
                 <div className="range-scale"><span>Plus de détections</span><span>Plus strict</span></div>
               </div>
             </div>}
-            <div className="camera-footnote"><Icon name="info" size={15} /><span>Les cadres sont mis à jour environ toutes les 0,65 seconde. Les performances dépendent de l’appareil et de l’éclairage.</span></div>
-            <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Zone d’inspection réservée aux équipements.</strong> Si une personne entre dans le champ, arrêtez immédiatement la détection. L’interface ignore et ne conserve pas les sorties « person », mais COCO-SSD est un modèle multi-classes générique : ce filtrage seul ne garantit pas l’absence de calcul interne sur une personne.</p></div>
+            <section className="owlvit-card live-model-options" aria-label="Modèles complémentaires du flux vidéo">
+              <label className="owlvit-toggle">
+                <input type="checkbox" checked={owlVideoEnabled} onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setOwlVideoEnabled(enabled);
+                  owlVideoPredictionsRef.current = [];
+                  lastOwlVideoRunAtRef.current = 0;
+                  if (enabled) loadOwlModel().catch(() => {});
+                  else { setOwlObserved(false); setOwlModelError(''); }
+                }} />
+                <span className="owlvit-toggle-copy"><strong>OWL-ViT dans le flux vidéo</strong><small>Recherche tableaux, fenêtres et bureaux environ toutes les 6,5 secondes. Le flux sera plus lent pendant ce calcul.</small></span>
+              </label>
+              {owlVideoEnabled && <>
+                <div className="confidence-control owlvit-threshold"><div className="confidence-heading"><label htmlFor="owl-video-threshold">Seuil OWL-ViT</label><strong>{Math.round(owlThreshold * 100)}%</strong></div><input id="owl-video-threshold" type="range" min="0.05" max="0.5" step="0.01" value={owlThreshold} onChange={(event) => setOwlThreshold(Number(event.target.value))} /><div className="range-scale"><span>Plus de propositions</span><span>Plus strict</span></div></div>
+                <div className={`owlvit-status owlvit-${owlModelStatus}`} role="status">{owlModelStatus === 'loading' ? `Chargement OWL-ViT… ${owlProgress}%` : owlModelStatus === 'ready' ? 'OWL-ViT chargé ; prochaine détection vidéo planifiée' : owlModelStatus === 'error' ? 'OWL-ViT indisponible — consultez le détail ci-dessous' : 'OWL-ViT sera chargé à l’activation.'}</div>
+                {owlModelStatus === 'loading' && <div className="owlvit-progress"><span style={{ width: `${owlProgress}%` }} /></div>}
+                {owlModelError && <div className="inline-error model-detail-error" role="alert"><Icon name="alert" size={16} />{owlModelError}<button className="text-button" onClick={() => { setOwlModelStatus('idle'); setOwlModelError(''); lastOwlVideoRunAtRef.current = 0; loadOwlModel().catch(() => {}); }}>Réessayer</button></div>}
+              </>}
+              <div className="model-option-divider" />
+              <label className="owlvit-toggle">
+                <input type="checkbox" checked={denseVideoEnabled} onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setDenseVideoEnabled(enabled);
+                  denseVideoPredictionsRef.current = [];
+                  lastDenseVideoRunAtRef.current = 0;
+                  if (enabled) loadDenseModel().catch(() => {});
+                }} />
+                <span className="owlvit-toggle-copy"><strong>Mode vidéo « scène dense » (YOLOv10n)</strong><small>Détecteur complémentaire pour multiplier les propositions d’objets COCO, recalculé environ toutes les 4,5 secondes.</small></span>
+              </label>
+              {denseVideoEnabled && <>
+                <div className={`owlvit-status owlvit-${denseModelStatus}`} role="status">{denseModelStatus === 'loading' ? `Chargement YOLOv10n… ${denseProgress}%` : denseModelStatus === 'ready' ? 'YOLOv10n chargé ; détections complémentaires actives' : denseModelStatus === 'error' ? 'YOLOv10n indisponible — consultez le détail ci-dessous' : 'YOLOv10n sera chargé à l’activation.'}</div>
+                {denseModelStatus === 'loading' && <div className="owlvit-progress"><span style={{ width: `${denseProgress}%` }} /></div>}
+                {denseModelError && <div className="inline-error model-detail-error" role="alert"><Icon name="alert" size={16} />{denseModelError}<button className="text-button" onClick={() => { setDenseModelStatus('idle'); setDenseModelError(''); lastDenseVideoRunAtRef.current = 0; loadDenseModel().catch(() => {}); }}>Réessayer</button></div>}
+              </>}
+            </section>
+            <div className="camera-footnote"><Icon name="info" size={15} /><span>COCO-SSD tourne environ toutes les 0,65 seconde. Les modèles complémentaires s’exécutent à intervalle réduit pour préserver la réactivité sur mobile.</span></div>
+            <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Zone d’inspection réservée aux équipements.</strong> Si une personne entre dans le champ, arrêtez immédiatement la détection. Les modèles génériques restent multi-classes : filtrer les sorties ne garantit pas l’absence de calcul interne sur une personne.</p></div>
             </> : <>
               <div className="image-upload-row">
                 <input ref={fileInputRef} className="visually-hidden-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageUpload} />
@@ -1095,15 +1367,20 @@ function App() {
                   <span className="image-detection-badge">{imageAnalyzed ? `${imagePredictions.length} détection(s) IA` : 'Pas encore analysée'}</span>
                 </div>
                 <div className="fixed-image-controls">
-                  <button className="button button-primary" onClick={analyzeFixedImage} disabled={datasetBusy || modelStatus === 'loading' || owlModelStatus === 'loading'}><Icon name="target" size={17} />{datasetBusy ? 'Traitement…' : owlEnabled ? 'Analyser avec COCO-SSD + OWL-ViT' : 'Analyser l’image'}</button>
+                  <button className="button button-primary" onClick={analyzeFixedImage} disabled={datasetBusy || modelStatus === 'loading' || owlModelStatus === 'loading' || denseModelStatus === 'loading'}><Icon name="target" size={17} />{datasetBusy ? 'Traitement…' : denseSceneEnabled && owlEnabled ? 'Analyser avec les 3 modèles' : denseSceneEnabled ? 'Analyser une scène dense' : owlEnabled ? 'Analyser avec COCO-SSD + OWL-ViT' : 'Analyser l’image'}</button>
                   <button className="button button-secondary" onClick={() => { setSelectedImage(null); setImagePredictions([]); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); setImageAnnotations([]); setImageAnalyzed(false); setOwlObserved(false); setImageOwlObserved(false); setAnnotationMode(false); setPendingBox(null); setEditingSampleId(null); }}><Icon name="close" size={16} /> Retirer l’image</button>
                 </div>
                 <section className="owlvit-card" aria-label="Détection complémentaire OWL-ViT">
                   <label className="owlvit-toggle">
-                    <input type="checkbox" checked={owlEnabled} onChange={(event) => setOwlEnabled(event.target.checked)} />
+                    <input type="checkbox" checked={owlEnabled} onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setOwlEnabled(enabled);
+                      if (enabled) loadOwlModel().catch(() => {});
+                      else { setOwlModelError(''); }
+                    }} />
                     <span className="owlvit-toggle-copy"><strong>Ajouter OWL-ViT pour tableaux, fenêtres et bureaux</strong><small>Détection zéro-shot complémentaire sur cette image fixe ; les résultats restent à confirmer.</small></span>
                   </label>
-                  <p className="owlvit-disclosure">Le modèle est chargé uniquement lorsque vous l’activez et lancez l’analyse. Le premier téléchargement est volumineux (environ 155 Mo pour les poids quantifiés) ; il peut être mis en cache par le navigateur. L’image elle-même est traitée localement.</p>
+                  <p className="owlvit-disclosure">Le modèle commence à se charger dès que vous activez cette option. Le premier téléchargement est volumineux (environ 155 Mo pour les poids quantifiés) ; il peut être mis en cache par le navigateur. L’image elle-même est traitée localement.</p>
                   {owlEnabled && <>
                     <div className="confidence-control owlvit-threshold">
                       <div className="confidence-heading"><label htmlFor="owl-threshold">Seuil OWL-ViT</label><strong>{Math.round(owlThreshold * 100)}%</strong></div>
@@ -1111,10 +1388,22 @@ function App() {
                       <div className="range-scale"><span>Plus de propositions</span><span>Plus strict</span></div>
                     </div>
                     <div className={`owlvit-status owlvit-${owlModelStatus}`} role="status">
-                      {owlModelStatus === 'loading' ? `Téléchargement / initialisation OWL-ViT… ${owlProgress}%` : owlModelStatus === 'ready' ? 'OWL-ViT chargé · prêt pour l’image fixe' : owlModelStatus === 'error' ? 'OWL-ViT indisponible' : 'OWL-ViT sera chargé au lancement de l’analyse.'}
+                      {owlModelStatus === 'loading' ? `Téléchargement / initialisation OWL-ViT… ${owlProgress}%` : owlModelStatus === 'ready' ? 'OWL-ViT chargé · prêt pour l’image fixe' : owlModelStatus === 'error' ? 'OWL-ViT indisponible — consultez le détail ci-dessous.' : 'OWL-ViT sera chargé au lancement de l’analyse.'}
                     </div>
                     {owlModelStatus === 'loading' && <div className="owlvit-progress"><span style={{ width: `${owlProgress}%` }} /></div>}
-                    {owlModelError && <div className="inline-error" role="alert"><Icon name="alert" size={16} />{owlModelError}<button className="text-button" onClick={() => { setOwlModelStatus('idle'); setOwlModelError(''); analyzeFixedImage(); }}>Réessayer</button></div>}
+                    {owlModelError && <div className="inline-error" role="alert"><Icon name="alert" size={16} />{owlModelError}<button className="text-button" onClick={() => { setOwlModelStatus('idle'); setOwlModelError(''); loadOwlModel().then(() => analyzeFixedImage()).catch(() => {}); }}>Réessayer</button></div>}
+                  </>}
+                </section>
+                <section className="owlvit-card" aria-label="Mode scènes denses YOLOv10n">
+                  <label className="owlvit-toggle">
+                    <input type="checkbox" checked={denseSceneEnabled} onChange={(event) => setDenseSceneEnabled(event.target.checked)} />
+                    <span className="owlvit-toggle-copy"><strong>Scène dense : YOLOv10n + COCO-SSD par zones</strong><small>Ajoute un deuxième détecteur généraliste et quatre découpes avec chevauchement afin de mieux récupérer les petits objets ou les scènes chargées.</small></span>
+                  </label>
+                  <p className="owlvit-disclosure">Le modèle YOLOv10n est téléchargé à la demande et reste dans le navigateur. Cette passe est plus lente, peut produire des doublons ou faux positifs, et cible les mêmes classes COCO que COCO-SSD ; ce n’est pas un modèle spécialisé dans les fenêtres ou tableaux.</p>
+                  {denseSceneEnabled && <>
+                    <div className={`owlvit-status owlvit-${denseModelStatus}`} role="status">{denseModelStatus === 'loading' ? `Téléchargement / initialisation YOLOv10n… ${denseProgress}%` : denseModelStatus === 'ready' ? 'YOLOv10n chargé · prêt pour l’image fixe' : denseModelStatus === 'error' ? 'YOLOv10n indisponible — consultez le détail ci-dessous.' : 'YOLOv10n sera chargé au lancement de l’analyse.'}</div>
+                    {denseModelStatus === 'loading' && <div className="owlvit-progress"><span style={{ width: `${denseProgress}%` }} /></div>}
+                    {denseModelError && <div className="inline-error model-detail-error" role="alert"><Icon name="alert" size={16} />{denseModelError}<button className="text-button" onClick={() => { setDenseModelStatus('idle'); setDenseModelError(''); loadDenseModel().then(() => analyzeFixedImage()).catch(() => {}); }}>Réessayer</button></div>}
                   </>}
                 </section>
               </> : <div className="image-empty-state"><Icon name="report" size={25} /><strong>Importez une image d’inspection</strong><span>La détection des objets s’effectue localement dans le navigateur, sans envoi du fichier.</span><button className="text-button" onClick={() => fileInputRef.current?.click()}>Parcourir les fichiers <Icon name="arrow" size={14} /></button></div>}
@@ -1124,7 +1413,7 @@ function App() {
                 <input id="confidence-image" type="range" min="0.2" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />
                 <div className="range-scale"><span>Plus de détections</span><span>Plus strict</span></div>
               </div>
-              <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Importez une image cadrée sur les équipements uniquement.</strong> COCO-SSD et OWL-ViT calculent sur les pixels de l’image, même si l’application n’affiche que des catégories autorisées. Pour respecter strictement l’exclusion des personnes, recadrez la photo avant analyse afin qu’aucune personne ne figure dans l’image.</p></div>
+              <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Importez une image cadrée sur les équipements uniquement.</strong> COCO-SSD, OWL-ViT et YOLOv10n peuvent calculer sur l’image entière, même si l’application n’affiche que des catégories autorisées. Pour respecter strictement l’exclusion des personnes, recadrez la photo avant analyse afin qu’aucune personne ne figure dans l’image.</p></div>
             </>}
           </article>
 

@@ -556,3 +556,15 @@ a { color: inherit; text-decoration: none; }
   .owlvit-card { padding: 12px; }
   .owlvit-disclosure, .owlvit-threshold, .owlvit-status, .owlvit-progress { margin-left: 0; }
 }
+
+/* Détecteurs complémentaires : états, chargement et erreurs explicites */
+.model-option-divider { height: 1px; margin: 14px 0; background: #e2e9df; }
+.live-model-options { margin-top: 15px; }
+.model-detail-error { align-items: flex-start; flex-wrap: wrap; overflow-wrap: anywhere; margin-top: 9px; }
+.model-detail-error > svg { flex-shrink: 0; margin-top: 2px; }
+.model-detail-error .text-button { flex-shrink: 0; }
+.owlvit-status { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .live-model-options { padding: 12px; }
+  .model-detail-error { font-size: 10px; line-height: 1.5; }
+}
