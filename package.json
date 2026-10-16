@@ -8,10 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "predev": "node scripts/copy-ort-assets.mjs",
-    "prebuild": "node scripts/copy-ort-assets.mjs",
-    "pages:deploy": "npm run build && wrangler pages deploy dist --config wrangler.pages.jsonc",
-    "deploy": "npm run build && node scripts/verify-dist.mjs && wrangler deploy",
-    "deploy:workers": "npm run deploy"
+    "prebuild": "node scripts/copy-ort-assets.mjs"
   },
   "dependencies": {
     "@tensorflow-models/coco-ssd": "^2.2.3",
@@ -22,7 +19,9 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.7",
-    "wrangler": "^4.68.0"
+    "vite": "^6.0.7"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

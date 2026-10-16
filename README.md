@@ -33,39 +33,29 @@ npm run build
 npm run preview
 ```
 
-## Déploiement Cloudflare — correction de `assets.directory ... /dist` introuvable
+## Déploiement Cloudflare Pages (configuration recommandée)
 
-L’erreur `The directory specified by the "assets.directory" field ... /dist does not exist` signifie que Wrangler démarre le déploiement avant que le build Vite ait créé `dist/index.html`. Le dossier `dist` est un artefact généré : il n’est volontairement pas stocké dans Git ni dans l’archive source.
+Ce projet est une application **Cloudflare Pages + Vite + Pages Functions**. Il ne doit pas être déployé comme un Worker avec `wrangler deploy` : cette commande utilise la configuration des Workers Assets et peut provoquer l’erreur `assets.directory .../dist does not exist` lorsque le build Pages n’a pas été exécuté.
 
-### Réglage recommandé si le projet est connecté à Cloudflare Workers Builds
+Dans **Workers & Pages → Create application → Pages → Connect to Git**, connectez le dépôt puis définissez :
 
-Dans **Workers & Pages → votre Worker → Settings / Build**, configurez exactement :
+- **Framework preset** : Vite (ou None).
+- **Root directory** : `/` (racine du dépôt).
+- **Build command** : `npm run build`.
+- **Build output directory** : `dist`.
+- **Deploy command** : aucun champ de déploiement personnalisé — Pages publie automatiquement le résultat du build.
 
-- **Root directory** : `/` (racine du dépôt)
-- **Build command** : laissez vide, pour éviter qu’un build séparé soit nécessaire à la commande de publication
-- **Deploy command** : `npm run deploy`
-- **Preview command** : pour les builds de prévisualisation, utilisez `npm run deploy` uniquement si vous souhaitez déployer ce même Worker ; sinon configurez un flux de preview distinct.
+Laissez Pages exécuter son flux de build/publication. Ne configurez ni `wrangler deploy`, ni un champ `assets.directory`, ni une commande de déploiement Worker. Les fichiers `functions/api/hf/[[path]].js` doivent rester dans le dépôt à côté de `src/` et `package.json` : Pages les déploie comme Function pour le relais des modèles.
 
-Le script `npm run deploy` exécute dans cet ordre `npm run build`, vérifie que `dist/index.html` existe, puis lance `wrangler deploy`. **Ne laissez pas `npx wrangler deploy` comme Deploy command**, car cette commande seule ne lance pas Vite et échouera si `dist` n’a pas été créé par une étape précédente.
-
-Le `wrangler.jsonc` à la racine configure un Worker avec Static Assets : `worker/index.js` traite `/api/hf/*` et les autres routes sont servies depuis `dist`. Les fichiers `dist` sont produits à chaque build et ne doivent pas être ajoutés au dépôt.
-
-En local, utilisez :
+Le script `prebuild` copie les fichiers ONNX Runtime WASM depuis les dépendances installées vers `public/ort/` avant l’exécution de Vite. Le build doit donc créer `dist/index.html`. Pour tester localement :
 
 ```bash
 npm install
-npm run deploy
+npm run build
+npm run preview
 ```
 
-Pour diagnostiquer le pipeline, le log doit afficher l’exécution de `vite build` et la création de `dist/index.html` **avant** l’appel Wrangler. Si cette commande échoue, corrigez d’abord l’erreur Vite affichée ; ne lancez pas Wrangler ensuite.
-
-### Variante si vous souhaitez rester sur Cloudflare Pages classique
-
-Dans un projet **Pages** (et non Workers Builds), configurez **Build command** `npm run build`, **Build output directory** `dist`, **Root directory** `/`, puis laissez Pages effectuer la publication. Ne mélangez pas les commandes : `wrangler deploy` utilise `wrangler.jsonc` pour Workers, tandis que `wrangler pages deploy` publie un projet Pages. Le projet conserve `wrangler.pages.jsonc` et `functions/api/hf/[[path]].js` pour cette variante.
-
-### Contrôle après publication
-
-Sur le domaine publié, ouvrir `/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais arrive à joindre Hugging Face. Une réponse 404 indique que la route API n’est pas déployée ; une réponse 502 indique un échec du relais vers Hugging Face.
+Si le projet actuellement configuré dans le tableau de bord est un **Worker** plutôt qu’un projet **Pages**, créez un nouveau projet Pages connecté au même dépôt. Une configuration de Worker ne devient pas une configuration Pages simplement en changeant le nom du dossier de sortie.
 
 ## Classes détectées et limites
 
@@ -117,7 +107,7 @@ Les images annotées résident dans IndexedDB sur l'appareil. L'export inclut le
 - Les routes du relais n'acceptent que les dépôts publics `Xenova/owlvit-base-patch32` et `onnx-community/yolov10n`, en lecture seule (`GET`/`HEAD`) ; elles ne constituent pas un proxy arbitraire.
 - Le relais ne reçoit pas d'images : seuls les fichiers publics des modèles sont récupérés depuis Hugging Face.
 - Vérifier que `npm run predev` ou `npm run prebuild` a copié les fichiers ONNX Runtime dans `public/ort/`.
-- Sur Cloudflare Pages, déployer le dossier `functions/` en même temps que `dist/`. Le déploiement des seuls fichiers statiques ne mettra pas en place `/api/hf/`.
+- Sur Cloudflare Pages via Git, conservez le dossier `functions/` à la racine du dépôt : Pages le déploie automatiquement avec le site.
 
 ## Journal des modifications
 

@@ -56,3 +56,10 @@
 - Mise à jour des instructions Workers Builds : la commande de déploiement doit être `npm run deploy`, qui génère les assets avant Wrangler.
 - Ajout de `scripts/verify-dist.mjs` pour vérifier que `dist/index.html` existe avant toute publication et afficher un diagnostic explicite sinon.
 - Le dossier `dist` reste généré durant le build et n’est pas commité dans le dépôt.
+
+## Correctif de déploiement — retour à Cloudflare Pages
+
+- Suppression de la configuration Wrangler Workers (`wrangler.jsonc`, `worker/index.js`) qui imposait `assets.directory: ./dist` et conduisait à l'erreur si la commande de build Pages n'était pas exécutée.
+- Le projet est de nouveau configuré pour Cloudflare Pages : `npm run build`, répertoire de sortie `dist`, Pages Functions dans `functions/`.
+- Suppression des scripts de déploiement Worker afin d'éviter le mélange entre `wrangler deploy` et le pipeline Pages.
+- Conservation de l'interface courante, des modèles secondaires et du relais `/api/hf/`.
