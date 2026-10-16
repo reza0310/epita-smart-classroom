@@ -162,9 +162,95 @@ function CategoryIcon({ category, size = 20 }) {
   return <span className="category-icon" style={{ '--category-color': category.color }}><Icon name={category.symbol} size={size} /></span>;
 }
 
+const DB_NAME = 'atlas-visual-audit';
+const DB_STORE = 'training-samples';
+
+function openTrainingDb() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('IndexedDB indisponible dans ce navigateur.'));
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE, { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Ouverture de la base locale impossible.'));
+  });
+}
+
+async function readTrainingSamples() {
+  const db = await openTrainingDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).getAll();
+    request.onsuccess = () => { db.close(); resolve((request.result || []).sort((a, b) => b.createdAt.localeCompare(a.createdAt))); };
+    request.onerror = () => { db.close(); reject(request.error || new Error('Lecture des exemples impossible.')); };
+  });
+}
+
+async function writeTrainingSample(sample) {
+  const db = await openTrainingDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(DB_STORE, 'readwrite');
+    transaction.objectStore(DB_STORE).put(sample);
+    transaction.oncomplete = () => { db.close(); resolve(sample); };
+    transaction.onerror = () => { db.close(); reject(transaction.error || new Error('Enregistrement local impossible.')); };
+  });
+}
+
+async function removeTrainingSample(id) {
+  const db = await openTrainingDb();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(DB_STORE, 'readwrite');
+    transaction.objectStore(DB_STORE).delete(id);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error || new Error('Suppression impossible.')); };
+  });
+}
+
+function downloadJsonFile(data, fileName) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Lecture de l’image impossible.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Cette image n’a pas pu être ouverte.'));
+    image.src = src;
+  });
+}
+
+const LEARNABLE_CATEGORIES = CATEGORIES.map((category) => ({
+  id: category.id,
+  label: category.label,
+  color: category.color,
+}));
+
 function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const fixedImageRef = useRef(null);
+  const fixedImageCanvasRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const datasetInputRef = useRef(null);
+  const drawStartRef = useRef(null);
   const modelRef = useRef(null);
   const busyRef = useRef(false);
   const thresholdRef = useRef(0.55);
@@ -185,8 +271,28 @@ function App() {
   const [view, setView] = useState('live');
   const [notice, setNotice] = useState('');
   const [showMethodNotes, setShowMethodNotes] = useState(false);
+  const [sourceMode, setSourceMode] = useState('camera');
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imagePredictions, setImagePredictions] = useState([]);
+  const [imageAnalyzed, setImageAnalyzed] = useState(false);
+  const [annotationMode, setAnnotationMode] = useState(false);
+  const [annotationCategory, setAnnotationCategory] = useState('board');
+  const [imageAnnotations, setImageAnnotations] = useState([]);
+  const [pendingBox, setPendingBox] = useState(null);
+  const [trainingSamples, setTrainingSamples] = useState([]);
+  const [editingSampleId, setEditingSampleId] = useState(null);
+  const [datasetBusy, setDatasetBusy] = useState(false);
 
   thresholdRef.current = threshold;
+
+  useEffect(() => {
+    let active = true;
+    readTrainingSamples().then((samples) => { if (active) setTrainingSamples(samples); }).catch((error) => {
+      console.warn('Training dataset initialization:', error);
+      if (active) setNotice('La base locale d’exemples n’est pas disponible dans ce navigateur.');
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -231,7 +337,299 @@ function App() {
     await loadDetectionModel();
   };
 
+  const handleImageUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setNotice('Choisissez une image au format JPEG, PNG ou WebP.');
+      return;
+    }
+    try {
+      const sourceDataUrl = await readFileAsDataUrl(file);
+      const image = await loadImageElement(sourceDataUrl);
+      const sourceWidth = image.naturalWidth || image.width;
+      const sourceHeight = image.naturalHeight || image.height;
+      const maxSide = 2048;
+      const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+      const normalizedCanvas = document.createElement('canvas');
+      normalizedCanvas.width = width;
+      normalizedCanvas.height = height;
+      const normalizedContext = normalizedCanvas.getContext('2d');
+      if (!normalizedContext) throw new Error('Le navigateur ne peut pas préparer cette image.');
+      if (file.type !== 'image/png') {
+        normalizedContext.fillStyle = '#ffffff';
+        normalizedContext.fillRect(0, 0, width, height);
+      }
+      normalizedContext.drawImage(image, 0, 0, width, height);
+      const dataUrl = normalizedCanvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.92);
+      setSelectedImage({
+        name: file.name || 'image-importee',
+        dataUrl,
+        width,
+        height,
+      });
+      setEditingSampleId(null);
+      setImagePredictions([]);
+      setObjects([]);
+      setCounts({ ...EMPTY_COUNTS });
+      setHasObservedFrame(false);
+      setLastInferenceAt(null);
+      setImageAnnotations([]);
+      setImageAnalyzed(false);
+      setPendingBox(null);
+      setAnnotationMode(false);
+      setNotice(`Image préparée localement (${width} × ${height} px${scale < 1 ? ', réduite pour les performances mobiles' : ''}). Analysez-la, puis dessinez des cadres pour corriger ou ajouter des annotations.`);
+    } catch (error) {
+      setNotice(error.message || 'Impossible de lire cette image.');
+    }
+  };
+
+  const analyzeFixedImage = async () => {
+    if (!selectedImage) {
+      setNotice('Importez d’abord une image.');
+      return;
+    }
+    if (!modelRef.current && !(await loadDetectionModel())) return;
+    setDatasetBusy(true);
+    setModelError('');
+    try {
+      const image = await loadImageElement(selectedImage.dataUrl);
+      // COCO-SSD is multi-class. Only equipment classes are kept in the application state;
+      // crop photos to equipment only when compliance requires no person analysis.
+      const predictions = await modelRef.current.detect(image, 40, thresholdRef.current);
+      const equipment = predictions
+        .filter((prediction) => AUTO_IDS.some((id) => CATEGORIES.find((category) => category.id === id)?.modelClass === prediction.class))
+        .map((prediction, index) => {
+          const category = CATEGORIES.find((item) => item.modelClass === prediction.class);
+          return {
+            id: `image-${prediction.class}-${index}`,
+            categoryId: category.id,
+            label: category.label,
+            color: category.color,
+            score: prediction.score,
+            bbox: prediction.bbox,
+          };
+        });
+      const nextCounts = { ...EMPTY_COUNTS };
+      equipment.forEach((object) => { nextCounts[object.categoryId] += 1; });
+      setImagePredictions(equipment);
+      setObjects(equipment);
+      setCounts(nextCounts);
+      setHasObservedFrame(true);
+      setImageAnalyzed(true);
+      setLastInferenceAt(new Date().toISOString());
+      setNotice(`${equipment.length} détection(s) d’équipement sur l’image fixe. Les objets non reconnus restent à vérifier manuellement.`);
+    } catch (error) {
+      console.error('Fixed-image detection error', error);
+      setModelError('La détection sur cette image a échoué. Essayez une image moins volumineuse ou un autre format.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
+  const getImagePoint = (event) => {
+    const canvas = fixedImageCanvasRef.current;
+    if (!canvas || !selectedImage) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(selectedImage.width, Math.max(0, ((event.clientX - rect.left) / rect.width) * selectedImage.width)),
+      y: Math.min(selectedImage.height, Math.max(0, ((event.clientY - rect.top) / rect.height) * selectedImage.height)),
+    };
+  };
+
+  const beginAnnotation = (event) => {
+    if (!annotationMode || !selectedImage) return;
+    const point = getImagePoint(event);
+    if (!point) return;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    drawStartRef.current = point;
+    setPendingBox({ x: point.x, y: point.y, width: 0, height: 0 });
+  };
+
+  const moveAnnotation = (event) => {
+    if (!annotationMode || !drawStartRef.current) return;
+    const point = getImagePoint(event);
+    if (!point) return;
+    const start = drawStartRef.current;
+    setPendingBox({ x: Math.min(start.x, point.x), y: Math.min(start.y, point.y), width: Math.abs(point.x - start.x), height: Math.abs(point.y - start.y) });
+  };
+
+  const finishAnnotation = (event) => {
+    if (!annotationMode || !drawStartRef.current) return;
+    const point = getImagePoint(event);
+    const start = drawStartRef.current;
+    drawStartRef.current = null;
+    setPendingBox(null);
+    if (!point) return;
+    const x = Math.min(start.x, point.x);
+    const y = Math.min(start.y, point.y);
+    const width = Math.abs(point.x - start.x);
+    const height = Math.abs(point.y - start.y);
+    if (width < 5 || height < 5) {
+      setNotice('Cadre trop petit. Faites glisser le doigt ou la souris autour de l’objet.');
+      return;
+    }
+    const category = CATEGORIES.find((item) => item.id === annotationCategory);
+    setImageAnnotations((previous) => [...previous, {
+      id: `ann-${Date.now()}-${previous.length}`,
+      categoryId: annotationCategory,
+      bbox: [x, y, width, height],
+      label: category?.label || annotationCategory,
+      color: category?.color || '#f7db65',
+    }]);
+  };
+
+  const saveCurrentSample = async () => {
+    if (!selectedImage) {
+      setNotice('Importez une image avant d’enregistrer un exemple.');
+      return;
+    }
+    if (imageAnnotations.length === 0) {
+      setNotice('Dessinez au moins un cadre et attribuez-lui une catégorie avant d’enregistrer cet exemple.');
+      return;
+    }
+    setDatasetBusy(true);
+    try {
+      const sample = {
+        id: editingSampleId || `sample-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: selectedImage.name,
+        dataUrl: selectedImage.dataUrl,
+        width: selectedImage.width,
+        height: selectedImage.height,
+        annotations: imageAnnotations.map((annotation) => ({
+          categoryId: annotation.categoryId,
+          bbox: annotation.bbox,
+        })),
+        createdAt: new Date().toISOString(),
+      };
+      await writeTrainingSample(sample);
+      setTrainingSamples((previous) => [sample, ...previous.filter((item) => item.id !== sample.id)]);
+      const wasEditing = Boolean(editingSampleId);
+      setEditingSampleId(null);
+      setNotice(`${wasEditing ? 'Exemple annoté mis à jour' : 'Exemple annoté enregistré'} localement : ${sample.annotations.length} objet(s). Le jeu de données est actualisé, mais le modèle déjà chargé n'est pas modifié.`);
+    } catch (error) {
+      console.error('Saving training sample error', error);
+      setNotice(error.message || 'Enregistrement de l’exemple impossible. Exportez ou réduisez la taille de l’image, puis réessayez.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
+  const exportTrainingDataset = () => {
+    if (trainingSamples.length === 0) {
+      setNotice('Aucun exemple à exporter. Annotez une image et enregistrez-la d’abord.');
+      return;
+    }
+    const categoryIds = Object.fromEntries(CATEGORIES.map((category, index) => [category.id, index + 1]));
+    let annotationId = 1;
+    const cocoImages = trainingSamples.map((sample, index) => ({
+      id: index + 1,
+      file_name: sample.name || `image-${index + 1}.jpg`,
+      width: sample.width,
+      height: sample.height,
+    }));
+    const cocoAnnotations = trainingSamples.flatMap((sample, imageIndex) => sample.annotations.map((annotation) => ({
+      id: annotationId++,
+      image_id: imageIndex + 1,
+      category_id: categoryIds[annotation.categoryId],
+      bbox: annotation.bbox.map((value) => Math.round(value * 100) / 100),
+      area: annotation.bbox[2] * annotation.bbox[3],
+      iscrowd: 0,
+    })));
+    const payload = {
+      format: 'atlas-labelled-dataset-v1',
+      exportedAt: new Date().toISOString(),
+      note: 'Le bloc samples embarque les images en dataUrl pour rendre l’export Atlas autonome ; le bloc coco respecte la structure d’annotations COCO. Les coordonnées bbox sont [x,y,largeur,hauteur] en pixels.',
+      categories: CATEGORIES.map((category, index) => ({ id: index + 1, name: category.id, label: category.label })),
+      samples: trainingSamples,
+      coco: { images: cocoImages, annotations: cocoAnnotations, categories: CATEGORIES.map((category, index) => ({ id: index + 1, name: category.id, supercategory: category.family || 'equipment' })) },
+    };
+    downloadJsonFile(payload, `atlas-jeu-apprentissage-${new Date().toISOString().slice(0, 10)}.json`);
+    setNotice('Jeu d’exemples exporté. Le JSON contient les images et les cadres annotés ; il pourra être préparé pour l’entraînement Faster R-CNN.');
+  };
+
+  const importTrainingDataset = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setDatasetBusy(true);
+    try {
+      const parsed = JSON.parse(await file.text());
+      const incoming = Array.isArray(parsed.samples) ? parsed.samples : null;
+      if (!incoming) throw new Error('Ce fichier ne contient pas de liste « samples » reconnue. Importez un export Atlas.');
+      let added = 0;
+      const saved = [];
+      for (const raw of incoming) {
+        if (!raw.dataUrl || !Array.isArray(raw.annotations) || !raw.width || !raw.height) continue;
+        const sample = {
+          id: raw.id || `sample-${Date.now()}-${added}`,
+          name: raw.name || raw.fileName || `image-importee-${added + 1}.jpg`,
+          dataUrl: raw.dataUrl,
+          width: Number(raw.width),
+          height: Number(raw.height),
+          annotations: raw.annotations.filter((annotation) => CATEGORIES.some((category) => category.id === annotation.categoryId) && Array.isArray(annotation.bbox) && annotation.bbox.length === 4),
+          createdAt: raw.createdAt || new Date().toISOString(),
+        };
+        if (!sample.annotations.length) continue;
+        await writeTrainingSample(sample);
+        saved.push(sample);
+        added += 1;
+      }
+      setTrainingSamples((previous) => [...saved, ...previous.filter((item) => !saved.some((sample) => sample.id === item.id))]);
+      setNotice(`${added} exemple(s) importé(s) dans la base locale.`);
+    } catch (error) {
+      setNotice(error.message || 'Import de la base d’apprentissage impossible.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
+  const editSample = (sample) => {
+    if (cameraOn) stopCamera();
+    setSourceMode('image');
+    setSelectedImage({ name: sample.name, dataUrl: sample.dataUrl, width: sample.width, height: sample.height });
+    setImagePredictions([]);
+    setObjects([]);
+    setCounts({ ...EMPTY_COUNTS });
+    setHasObservedFrame(false);
+    setImageAnalyzed(false);
+    setImageAnnotations(sample.annotations.map((annotation, index) => {
+      const category = CATEGORIES.find((item) => item.id === annotation.categoryId);
+      return {
+        id: `edit-${sample.id}-${index}`,
+        categoryId: annotation.categoryId,
+        bbox: [...annotation.bbox],
+        label: category?.label || annotation.categoryId,
+        color: category?.color || '#f7db65',
+      };
+    }));
+    setAnnotationMode(false);
+    setPendingBox(null);
+    setEditingSampleId(sample.id);
+    setNotice(`Modification de « ${sample.name} ». Enregistrez l’exemple pour remplacer sa version locale.`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const deleteSample = async (id) => {
+    try {
+      await removeTrainingSample(id);
+      if (editingSampleId === id) setEditingSampleId(null);
+      setTrainingSamples((previous) => previous.filter((sample) => sample.id !== id));
+    } catch (error) {
+      setNotice(error.message || 'Impossible de supprimer cet exemple local.');
+    }
+  };
+
   const startCamera = async () => {
+    setSourceMode('camera');
+    setObjects([]);
+    setCounts({ ...EMPTY_COUNTS });
+    setHasObservedFrame(false);
+    setLastInferenceAt(null);
     setCameraError('');
     setModelError('');
     setNotice('');
@@ -346,6 +744,42 @@ function App() {
     });
   }, [objects, cameraOn, stream]);
 
+  useEffect(() => {
+    const canvas = fixedImageCanvasRef.current;
+    if (!canvas || !selectedImage) return;
+    canvas.width = selectedImage.width;
+    canvas.height = selectedImage.height;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const drawBox = (bbox, color, label, dashed = false) => {
+      const [x, y, width, height] = bbox;
+      context.save();
+      context.lineWidth = Math.max(3, selectedImage.width / 450);
+      context.strokeStyle = color;
+      context.fillStyle = `${color}20`;
+      context.setLineDash(dashed ? [10, 7] : []);
+      context.fillRect(x, y, width, height);
+      context.strokeRect(x, y, width, height);
+      context.setLineDash([]);
+      const fontSize = Math.max(15, selectedImage.width / 70);
+      context.font = `600 ${fontSize}px Inter, system-ui, sans-serif`;
+      const textWidth = context.measureText(label).width;
+      const tagHeight = fontSize + 12;
+      const tagY = Math.max(0, y - tagHeight);
+      context.fillStyle = color;
+      context.fillRect(x, tagY, textWidth + 16, tagHeight);
+      context.fillStyle = '#12261f';
+      context.fillText(label, x + 8, tagY + fontSize + 1);
+      context.restore();
+    };
+    imagePredictions.forEach((object) => drawBox(object.bbox, object.color, `${object.label} · ${Math.round(object.score * 100)}%`));
+    imageAnnotations.forEach((annotation, index) => drawBox(annotation.bbox, annotation.color || CATEGORIES.find((item) => item.id === annotation.categoryId)?.color || '#f7db65', `Manuel ${index + 1} · ${annotation.label || CATEGORIES.find((item) => item.id === annotation.categoryId)?.label || annotation.categoryId}`, true));
+    if (pendingBox) {
+      drawBox([pendingBox.x, pendingBox.y, pendingBox.width, pendingBox.height], CATEGORIES.find((item) => item.id === annotationCategory)?.color || '#f7db65', 'Annotation en cours', true);
+    }
+  }, [selectedImage, imagePredictions, imageAnnotations, pendingBox, annotationCategory, sourceMode]);
+
   const liveRows = useMemo(
     () => makeRows(expected, counts, manual, hasObservedFrame, false),
     [expected, counts, manual, hasObservedFrame],
@@ -366,6 +800,7 @@ function App() {
       observed: hasObservedFrame,
       threshold,
       model: 'COCO-SSD · lite_mobilenet_v2',
+      source: sourceMode === 'image' ? `Image fixe : ${selectedImage?.name || 'image importée'}` : 'Caméra / dernière image vidéo',
     };
     setAuditSnapshot(snapshot);
     setView('report');
@@ -419,7 +854,7 @@ function App() {
   const pageSummary = view === 'report' ? reportSummary : liveSummary;
   const verifiedDescription = view === 'report' && auditSnapshot
     ? `Relevé du ${formatDate(auditSnapshot.createdAt)}`
-    : hasObservedFrame ? 'Instantané courant · évolue avec la caméra' : 'Configurez les attentes puis démarrez la caméra';
+    : hasObservedFrame ? (sourceMode === 'image' ? 'Dernière image fixe analysée' : 'Instantané courant · évolue avec la caméra') : 'Configurez les attentes puis démarrez la caméra';
 
   return <div className="app-shell">
     <header className="topbar">
@@ -470,9 +905,14 @@ function App() {
         <section className="workspace-grid">
           <article className="panel camera-panel">
             <div className="panel-heading">
-              <div><div className="section-kicker">ESPACE DE CONTRÔLE</div><h2>Flux de détection</h2></div>
-              <div className={`live-indicator ${cameraOn ? 'is-live' : ''}`}><span />{cameraOn ? 'EN DIRECT' : 'À L’ARRÊT'}</div>
+              <div><div className="section-kicker">ESPACE DE CONTRÔLE</div><h2>{sourceMode === 'image' ? 'Analyse d’une image' : 'Flux de détection'}</h2></div>
+              <div className={`live-indicator ${cameraOn && sourceMode === 'camera' ? 'is-live' : ''}`}><span />{sourceMode === 'image' ? 'IMAGE FIXE' : cameraOn ? 'EN DIRECT' : 'À L’ARRÊT'}</div>
             </div>
+            <div className="source-tabs" role="tablist" aria-label="Source visuelle">
+              <button className={sourceMode === 'camera' ? 'source-tab active' : 'source-tab'} onClick={() => { setSourceMode('camera'); setAnnotationMode(false); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); if (cameraOn) setNotice('La caméra est sélectionnée.'); }} role="tab" aria-selected={sourceMode === 'camera'}><Icon name="camera" size={16} /> Caméra / vidéo</button>
+              <button className={sourceMode === 'image' ? 'source-tab active' : 'source-tab'} onClick={() => { if (cameraOn) stopCamera(); setSourceMode('image'); setAnnotationMode(false); const restoredCounts = { ...EMPTY_COUNTS }; imagePredictions.forEach((object) => { restoredCounts[object.categoryId] += 1; }); setObjects(imagePredictions); setCounts(restoredCounts); setHasObservedFrame(Boolean(imageAnalyzed)); setLastInferenceAt(imageAnalyzed ? lastInferenceAt : null); }} role="tab" aria-selected={sourceMode === 'image'}><Icon name="report" size={16} /> Image téléchargée</button>
+            </div>
+            {sourceMode === 'camera' ? <>
             <div className={`video-stage ${cameraOn ? 'video-active' : ''}`}>
               <video ref={videoRef} autoPlay muted playsInline aria-label="Flux vidéo de la caméra" />
               <canvas ref={canvasRef} className="overlay-canvas" aria-label="Cadres de détection superposés" />
@@ -488,16 +928,41 @@ function App() {
             </div>
             {cameraError && <div className="inline-error" role="alert"><Icon name="alert" size={17} />{cameraError}</div>}
             {modelError && <div className="inline-error" role="alert"><Icon name="alert" size={17} />{modelError}<button className="text-button" onClick={retryModelLoad}>Réessayer</button></div>}
-            <div className="camera-controls">
+            {sourceMode === 'camera' && <div className="camera-controls">
               {cameraOn ? <button className="button button-danger" onClick={stopCamera}><Icon name="stop" size={17} /> Arrêter la caméra</button> : <button className="button button-primary" onClick={startCamera} disabled={modelStatus === 'loading'}><Icon name="camera" size={17} />{modelStatus === 'loading' ? 'Chargement du modèle…' : 'Démarrer la caméra'}</button>}
               <div className="confidence-control">
                 <div className="confidence-heading"><label htmlFor="confidence">Seuil de confiance</label><strong>{Math.round(threshold * 100)}%</strong></div>
                 <input id="confidence" type="range" min="0.2" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />
                 <div className="range-scale"><span>Plus de détections</span><span>Plus strict</span></div>
               </div>
-            </div>
+            </div>}
             <div className="camera-footnote"><Icon name="info" size={15} /><span>Les cadres sont mis à jour environ toutes les 0,65 seconde. Les performances dépendent de l’appareil et de l’éclairage.</span></div>
             <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Zone d’inspection réservée aux équipements.</strong> Si une personne entre dans le champ, arrêtez immédiatement la détection. L’interface ignore et ne conserve pas les sorties « person », mais COCO-SSD est un modèle multi-classes générique : ce filtrage seul ne garantit pas l’absence de calcul interne sur une personne.</p></div>
+            </> : <>
+              <div className="image-upload-row">
+                <input ref={fileInputRef} className="visually-hidden-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageUpload} />
+                <button className="button button-secondary" onClick={() => fileInputRef.current?.click()}><Icon name="download" size={17} /> Choisir une image</button>
+                <span className="image-file-name">{selectedImage ? `${selectedImage.name} · ${selectedImage.width} × ${selectedImage.height}` : 'JPEG, PNG ou WebP · image conservée sur cet appareil'}</span>
+              </div>
+              {selectedImage ? <>
+                <div className="fixed-image-stage" style={{ aspectRatio: `${selectedImage.width} / ${selectedImage.height}` }}>
+                  <img ref={fixedImageRef} src={selectedImage.dataUrl} alt="Image fixe importée pour audit" />
+                  <canvas ref={fixedImageCanvasRef} className={`fixed-image-canvas ${annotationMode ? 'is-annotating' : ''}`} onPointerDown={beginAnnotation} onPointerMove={moveAnnotation} onPointerUp={finishAnnotation} onPointerCancel={finishAnnotation} aria-label="Image avec cadres de détection et d’annotation" />
+                  <span className="image-detection-badge">{imageAnalyzed ? `${imagePredictions.length} détection(s) IA` : 'Pas encore analysée'}</span>
+                </div>
+                <div className="fixed-image-controls">
+                  <button className="button button-primary" onClick={analyzeFixedImage} disabled={datasetBusy || modelStatus === 'loading'}><Icon name="target" size={17} />{datasetBusy ? 'Traitement…' : 'Analyser l’image'}</button>
+                  <button className="button button-secondary" onClick={() => { setSelectedImage(null); setImagePredictions([]); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); setImageAnnotations([]); setImageAnalyzed(false); setAnnotationMode(false); setPendingBox(null); setEditingSampleId(null); }}><Icon name="close" size={16} /> Retirer l’image</button>
+                </div>
+              </> : <div className="image-empty-state"><Icon name="report" size={25} /><strong>Importez une image d’inspection</strong><span>La détection des objets s’effectue localement dans le navigateur, sans envoi du fichier.</span><button className="text-button" onClick={() => fileInputRef.current?.click()}>Parcourir les fichiers <Icon name="arrow" size={14} /></button></div>}
+              {modelError && <div className="inline-error" role="alert"><Icon name="alert" size={17} />{modelError}<button className="text-button" onClick={retryModelLoad}>Réessayer</button></div>}
+              <div className="confidence-control image-threshold">
+                <div className="confidence-heading"><label htmlFor="confidence-image">Seuil de confiance</label><strong>{Math.round(threshold * 100)}%</strong></div>
+                <input id="confidence-image" type="range" min="0.2" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />
+                <div className="range-scale"><span>Plus de détections</span><span>Plus strict</span></div>
+              </div>
+              <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Importez une image cadrée sur les équipements.</strong> COCO-SSD est multi-classes même si l’application filtre ses résultats ; pour une exigence stricte, recadrez la photo afin qu’aucune personne ne figure dans l’image analysée.</p></div>
+            </>}
           </article>
 
           <aside className="panel detections-panel">
@@ -507,11 +972,13 @@ function App() {
             </div>
             <p className="panel-subtitle">Comptage des objets visibles dans la dernière image traitée, pas un inventaire garanti de toute la pièce.</p>
             <div className="category-count-list">
-              {CATEGORIES.filter((category) => category.method === 'auto').map((category) => {
-                const count = hasObservedFrame ? counts[category.id] : null;
+              {CATEGORIES.map((category) => {
+                const count = category.method === 'auto'
+                  ? (hasObservedFrame ? counts[category.id] : null)
+                  : getValue(manual[category.id]);
                 return <div className="category-count-row" key={category.id}>
                   <CategoryIcon category={category} />
-                  <div className="category-count-info"><span>{category.label}</span><small>{category.method === 'auto' ? 'COCO-SSD' : 'Manuel'}</small></div>
+                  <div className="category-count-info"><span>{category.label}</span><small>{category.method === 'auto' ? 'COCO-SSD' : 'Relevé manuel'}</small></div>
                   <span className={`category-count-value ${count > 0 ? 'has-count' : ''}`}>{count === null ? '—' : count}</span>
                 </div>;
               })}
@@ -529,6 +996,36 @@ function App() {
             </div>
             <div className="model-note"><span className="note-icon"><Icon name="shield" size={17} /></span><p><strong>Sorties limitées aux équipements</strong><br />Les résultats hors des quatre classes suivies ne sont pas affichés ni conservés par l’application.</p></div>
           </aside>
+        </section>
+
+        <section className="panel learning-panel">
+          <div className="panel-heading learning-heading">
+            <div><div className="section-kicker">ANNOTATION & APPRENTISSAGE SUPERVISÉ</div><h2>Apprendre à partir de corrections humaines</h2></div>
+            <span className="training-count">{trainingSamples.length} exemple(s) local(aux)</span>
+          </div>
+          <p className="panel-subtitle">Importez une image, choisissez une catégorie, puis dessinez un cadre autour de chaque objet. Annotez en priorité les fenêtres, tableaux et bureaux manqués, ainsi que les détections incorrectes. Les annotations constituent un jeu de données : elles ne réentraînent pas instantanément COCO-SSD.</p>
+          <div className="annotation-toolbar">
+            <label className="annotation-select-label" htmlFor="annotation-category">Catégorie à annoter</label>
+            <select id="annotation-category" value={annotationCategory} onChange={(event) => setAnnotationCategory(event.target.value)}>
+              {LEARNABLE_CATEGORIES.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+            </select>
+            <button className={annotationMode ? 'button button-primary' : 'button button-secondary'} disabled={!selectedImage || sourceMode !== 'image'} onClick={() => { setAnnotationMode((value) => !value); setPendingBox(null); }}><Icon name="target" size={16} />{annotationMode ? 'Terminer l’annotation' : 'Dessiner des cadres'}</button>
+            <button className="button button-secondary" onClick={saveCurrentSample} disabled={!selectedImage || imageAnnotations.length === 0 || datasetBusy}><Icon name="check" size={16} />{editingSampleId ? 'Mettre à jour l’exemple' : 'Enregistrer l’exemple'}</button>
+          </div>
+          {sourceMode !== 'image' || !selectedImage ? <div className="annotation-empty"><Icon name="info" size={18} /><span>Sélectionnez <strong>Image téléchargée</strong> et importez une photo pour activer le dessin des cadres.</span></div> : <>
+            <div className={`annotation-hint ${annotationMode ? 'annotation-hint-active' : ''}`}><span className="hint-dot" />{annotationMode ? 'Mode dessin actif : faites glisser le doigt ou la souris sur l’image pour encadrer un objet.' : 'Choisissez une catégorie puis activez « Dessiner des cadres ». Les cadres manuels sont en pointillés.'}</div>
+            {imageAnnotations.length > 0 ? <div className="annotation-list"><span className="annotation-list-title">Annotations non enregistrées ({imageAnnotations.length})</span>{imageAnnotations.map((annotation, index) => <div className="annotation-chip" key={annotation.id}><span className="annotation-color" style={{ background: annotation.color }} /><span>{index + 1}. {annotation.label}</span><small>{annotation.bbox.map((value) => Math.round(value)).join(' · ')}</small><button className="icon-button" onClick={() => setImageAnnotations((previous) => previous.filter((item) => item.id !== annotation.id))} aria-label={`Supprimer annotation ${index + 1}`}><Icon name="close" size={14} /></button></div>)}</div> : <p className="annotation-empty-text">Aucun cadre manuel pour cette image pour le moment.</p>}
+          </>}
+          <div className="dataset-controls">
+            <div className="dataset-description"><strong>Jeu de données d’apprentissage</strong><span>Conservé dans IndexedDB sur cet appareil. Exportez régulièrement une copie de sauvegarde avant de changer de navigateur ou d’effacer ses données.</span></div>
+            <div className="dataset-actions">
+              <input ref={datasetInputRef} className="visually-hidden-input" type="file" accept="application/json,.json" onChange={importTrainingDataset} />
+              <button className="button button-secondary" onClick={() => datasetInputRef.current?.click()} disabled={datasetBusy}>Importer un jeu</button>
+              <button className="button button-primary" onClick={exportTrainingDataset} disabled={trainingSamples.length === 0 || datasetBusy}><Icon name="download" size={16} /> Exporter annotations + images</button>
+            </div>
+          </div>
+          {trainingSamples.length > 0 && <div className="saved-samples-list">{trainingSamples.slice(0, 5).map((sample) => <div className="saved-sample-row" key={sample.id}><span className="saved-sample-thumb"><img src={sample.dataUrl} alt="" /></span><span className="saved-sample-name"><strong>{sample.name}</strong><small>{sample.annotations.length} annotation(s) · {new Date(sample.createdAt).toLocaleDateString('fr-FR')}</small></span><div className="saved-sample-actions"><button className="text-button" onClick={() => editSample(sample)}>Modifier</button><button className="text-button remove-sample" onClick={() => deleteSample(sample.id)}>Supprimer</button></div></div>)}{trainingSamples.length > 5 && <p className="dataset-more">+ {trainingSamples.length - 5} autre(s) exemple(s) enregistré(s)</p>}</div>}
+          <div className="faster-rcnn-note"><span className="note-icon"><Icon name="target" size={17} /></span><p><strong>Étape d’entraînement recommandée : Faster R-CNN.</strong><br />Le ZIP inclut un pipeline Python pour extraire ces annotations au format COCO et préparer le jeu d’images. L’entraînement Faster R-CNN s’effectue sur une machine équipée de TensorFlow Object Detection API ; le modèle entraîné doit ensuite être converti et validé pour l’inférence web. Cette séparation évite de prétendre que COCO-SSD apprend dans la page.</p></div>
         </section>
 
         <section className="panel audit-config-panel">
@@ -564,11 +1061,11 @@ function App() {
           <h3>Limites à connaître avant l’audit</h3>
           <p><strong>Classes disponibles :</strong> la détection automatique exploite uniquement les classes <code>chair</code>, <code>dining table</code>, <code>laptop</code> et <code>tv</code>. Les bureaux, fenêtres, tableaux et anomalies visuelles ne sont pas couverts de façon native par ce modèle.</p>
           <p><strong>Personnes :</strong> l’interface ne présente, n’enregistre et n’exporte pas les sorties « person », et ne fait aucune identification. Cependant, COCO-SSD reste un modèle généraliste multi-classes : filtrer ses sorties n'est pas la preuve qu'aucun calcul interne relatif à une personne n'a lieu. Pour une exigence stricte, cadre la caméra uniquement sur les équipements, suspends la détection si quelqu’un entre dans le champ et remplace le modèle générique par un détecteur spécialisé limité aux classes d’équipement.</p>
-          <p><strong>Apprentissage :</strong> cette version n'effectue ni apprentissage supervisé sur les retours d'audit ni apprentissage par renforcement. Un tel apprentissage réel exige un jeu de données annoté et un pipeline d'entraînement dédié.</p>
+          <p><strong>Annotations :</strong> les cadres manuels sont stockés en local et exportables avec leurs images pour entraîner un modèle spécialisé. Ils n’altèrent pas directement les poids de COCO-SSD.</p><p><strong>Faster R-CNN :</strong> le pipeline fourni prépare un jeu de données COCO pour un entraînement hors navigateur. Il faut exporter, convertir et valider un modèle spécialisé avant de le brancher comme moteur d’inférence web.</p>
         </section>}
       </> : <>
         <section className="report-heading panel">
-          <div className="report-heading-main"><div className="report-emblem"><Icon name="report" size={25} /></div><div><div className="section-kicker">SYNTHÈSE DE VÉRIFICATION</div><h2>Rapport d’audit visuel</h2><p>{auditSnapshot ? `Relevé enregistré le ${formatDate(auditSnapshot.createdAt)}.` : 'Aucun relevé figé. Ce rapport est une prévisualisation des données actuellement disponibles.'}</p></div></div>
+          <div className="report-heading-main"><div className="report-emblem"><Icon name="report" size={25} /></div><div><div className="section-kicker">SYNTHÈSE DE VÉRIFICATION</div><h2>Rapport d’audit visuel</h2><p>{auditSnapshot ? `Relevé enregistré le ${formatDate(auditSnapshot.createdAt)} · ${auditSnapshot.source || 'source non précisée'}.` : 'Aucun relevé figé. Ce rapport est une prévisualisation des données actuellement disponibles.'}</p></div></div>
           <div className="report-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" size={17} /> Exporter JSON</button><button className="button button-primary" onClick={() => window.print()}><Icon name="report" size={17} /> Imprimer / PDF</button></div>
         </section>
         <section className="report-status-panel">

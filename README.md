@@ -1,6 +1,17 @@
 # Atlas — Audit visuel des équipements
 
-Application React + Vite, conçue pour Cloudflare Pages. Les détections COCO-SSD sont réalisées dans le navigateur. Les images de la caméra ne sont ni téléversées ni enregistrées par l'application.
+Application React + Vite conçue pour Cloudflare Pages. Elle peut analyser le flux caméra/vidéo ou une image fixe sélectionnée par l'utilisateur. La détection COCO-SSD et le dessin des cadres sont effectués dans le navigateur.
+
+## Fonctionnalités
+
+- Caméra en direct avec détection des catégories d'équipement couvertes par COCO-SSD.
+- Import et analyse d'une image fixe JPEG, PNG ou WebP.
+- Affichage de cadres, catégorie, score de confiance et comptage par catégorie.
+- Seuil de confiance réglable.
+- Configuration de quantités attendues, relevés manuels et rapport exportable/imprimable.
+- Annotation manuelle de boîtes pour chaises, tables/bureaux, ordinateurs portables, écrans, tableaux, fenêtres et anomalies.
+- Stockage local des exemples annotés dans IndexedDB ; import/export des exemples avec images intégrées.
+- Scripts pour préparer les annotations COCO et des TFRecords, puis fine-tuner un modèle Faster R-CNN avec TensorFlow Object Detection API (voir `training/README.md`).
 
 ## Démarrer en local
 
@@ -11,7 +22,7 @@ npm install
 npm run dev
 ```
 
-Ouvrir l'URL affichée par Vite. La caméra nécessite un contexte sécurisé : `localhost` en local ou HTTPS une fois déployé. Au premier lancement, le navigateur télécharge les bibliothèques et les poids du modèle COCO-SSD ; les images de la caméra, elles, restent locales.
+Ouvrir l'URL affichée par Vite. L'accès caméra nécessite un contexte sécurisé : `localhost` en local ou HTTPS une fois déployé. Au premier lancement, le navigateur télécharge les bibliothèques et les poids COCO-SSD. Les images caméra ne sont ni téléversées ni enregistrées par l'application.
 
 Pour tester le build de production :
 
@@ -22,24 +33,36 @@ npm run preview
 
 ## Déploiement Cloudflare Pages
 
-1. Envoyer ce projet dans un dépôt Git (GitHub ou GitLab).
-2. Dans Cloudflare, créer un projet Pages et connecter le dépôt.
-3. Paramètres de build : **Build command** `npm run build` ; **Build output directory** `dist`.
-4. Déployer. L'accès à la caméra doit être accordé par l'utilisateur et fonctionne en HTTPS.
+1. Envoyer ce projet dans un dépôt Git.
+2. Créer un projet Pages et connecter le dépôt.
+3. Commande de build : `npm run build` ; répertoire de sortie : `dist`.
+4. Déployer. Autoriser explicitement la caméra si on choisit le mode caméra.
 
-## Détections et limites
+## Classes détectées et limites
 
-COCO-SSD renvoie des boîtes, classes et scores pour les classes du jeu COCO. Cette interface ne conserve que les sorties `chair`, `dining table`, `laptop` et `tv`, présentées sous les noms Chaise, Table, Ordinateur portable et Écran. Un bureau peut ne pas être reconnu comme `dining table`, et `tv` ne permet pas de garantir que l'objet est un écran d'ordinateur.
+COCO-SSD renvoie des boîtes, classes et scores pour les classes COCO. Cette application ne conserve que les sorties `chair`, `dining table`, `laptop` et `tv`, présentées comme Chaises, Tables & bureaux, Ordinateurs portables et Écrans. COCO-SSD peut manquer un bureau et `tv` ne garantit pas qu'un objet soit un écran d'ordinateur.
 
-Les fenêtres, tableaux et anomalies ne font pas partie des catégories COCO-SSD utilisables ici : ils sont relevés manuellement. Pour une détection automatique réelle, il faut entraîner/évaluer un modèle spécialisé sur des images représentatives et des annotations de ces classes. Faster R-CNN n'est pas proposé ici car la version COCO-SSD est conçue pour être légère dans le navigateur.
+Les fenêtres, tableaux et anomalies ne sont pas des classes natives de COCO-SSD. Ils peuvent désormais être encadrés manuellement dans une image et sauvegardés en tant qu'exemples d'apprentissage. Ces annotations corrigent le jeu de données, mais ne changent pas les poids du modèle déjà chargé. Le détecteur ne s'améliore réellement qu'après entraînement/évaluation d'un modèle spécialisé. Les instructions et scripts Faster R-CNN sont dans `training/`.
 
-**Confidentialité et personnes :** l'interface ne présente, n'enregistre et n'exporte aucune sortie de classe `person`, et ne réalise aucune identification. Toutefois, COCO-SSD est un modèle générique multi-classes : filtrer sa sortie ne garantit pas l'absence de calcul interne relatif à une personne présente dans l'image. Pour respecter strictement une politique de non-analyse des personnes, cadrer physiquement la caméra sur le mobilier, suspendre l'analyse dès qu'une personne entre dans le champ, et remplacer COCO-SSD par un modèle spécialisé limité aux classes d'équipement avant un usage où cette garantie est impérative.
+## Apprentissage avec corrections humaines et Faster R-CNN
 
-## Apprentissage / renforcement
+1. Importer une image et activer **Dessiner des cadres**.
+2. Sélectionner une catégorie et encadrer chaque objet visible. Annoter en priorité les tables/bureaux manqués, tableaux et fenêtres.
+3. Enregistrer l'exemple, puis exporter le jeu d'apprentissage. L'export JSON contient les images en base64 et les annotations.
+4. Suivre [`training/README.md`](training/README.md) pour extraire le jeu COCO, générer les TFRecords et fine-tuner un Faster R-CNN pré-entraîné.
 
-Cette version utilise un modèle pré-entraîné : il ne se ré-entraîne pas et n'apprend pas par renforcement. Le rapport et la configuration permettent une supervision humaine, mais les corrections ne sont pas envoyées à un serveur et ne modifient pas le modèle. Un véritable apprentissage supervisé demanderait un jeu d'images annotées et un pipeline d'entraînement ; l'apprentissage par renforcement ne consiste pas simplement à ajuster un seuil ou à donner un avis utilisateur.
+**Faster R-CNN n'est pas chargé automatiquement dans l'interface.** Le pipeline prépare et entraîne un modèle dans un environnement TensorFlow séparé. La conversion TFJS d'un Faster R-CNN doit être validée avec les versions/outils utilisés et un adaptateur d'inférence adapté au graphe exporté avant de le rendre sélectionnable dans l'application. COCO-SSD reste le moteur d'inférence de la version actuelle.
+
+## Confidentialité et personnes
+
+Ne pas importer de photos contenant des personnes. Cadrer ou recadrer l'image pour conserver uniquement le mobilier et les équipements. L'interface ne présente ni ne conserve les sorties de classe `person` et n'effectue aucune identification ; toutefois, COCO-SSD reste un modèle générique multi-classes, de sorte que le seul filtrage des sorties ne garantit pas l'absence de calcul interne relatif à une personne dans l'image. Pour un usage où l'absence d'analyse des personnes est une exigence impérative, remplacer ce modèle par un détecteur spécialisé sur les seules classes d'équipement avant déploiement.
+
+Les images annotées résident dans IndexedDB sur l'appareil. L'export inclut les images : il est volumineux et potentiellement sensible. L'utilisateur doit choisir explicitement quand l'exporter et où le stocker.
 
 ## Références
 
-- COCO-SSD : https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd
-- Configuration de build Cloudflare Pages : https://developers.cloudflare.com/pages/configuration/build-configuration/
+- COCO-SSD : <https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd>
+- TensorFlow.js — conversion de modèles : <https://www.tensorflow.org/js/guide/conversion>
+- TensorFlow Object Detection API : <https://github.com/tensorflow/models/tree/master/research/object_detection>
+- Faster R-CNN Model Zoo : <https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/tf2_detection_zoo.md>
+- Configuration Cloudflare Pages : <https://developers.cloudflare.com/pages/configuration/build-configuration/>
