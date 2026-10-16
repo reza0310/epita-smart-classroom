@@ -40,3 +40,12 @@
 - Ajout du script facultatif `npm run pages:deploy` pour lancer un build puis `wrangler pages deploy dist`. Pour les dépôts Git connectés à Pages, laisser le déploiement automatique de Pages gérer l'étape de publication.
 - Vérification syntaxique locale de `vite.config.js` avec `node --check` : aucune erreur de syntaxe JavaScript détectée.
 - La compilation Vite complète reste à vérifier dans un environnement où les dépendances npm peuvent être installées.
+
+
+## Correctif de build Wrangler — configuration explicite
+
+- Ajout de `wrangler.jsonc` avec un point d’entrée Worker explicite (`worker/index.js`) et une configuration Static Assets pour `dist`, afin de désactiver l’auto-détection qui pouvait tenter d’interpréter `vite.config.js` comme entrée de déploiement.
+- Ajout de `worker/index.js` qui sert le relais sécurisé `/api/hf/*` et délègue les autres requêtes au binding `ASSETS`. Les images ne sont pas envoyées au relais.
+- Ajout d’une configuration distincte `wrangler.pages.jsonc` et d’instructions pour conserver, si nécessaire, un déploiement Pages classique.
+- Ajout du script `npm run deploy` pour construire puis lancer `wrangler deploy`, ainsi que `npm run pages:deploy` pour la variante Pages.
+- Vérifications syntaxiques JavaScript/JSON effectuées localement. La compilation complète dépend encore de l’installation des dépendances npm et doit être exécutée dans l’environnement Cloudflare.

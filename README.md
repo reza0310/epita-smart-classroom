@@ -33,36 +33,45 @@ npm run build
 npm run preview
 ```
 
-## Déploiement Cloudflare Pages — important
+## Déploiement Cloudflare — configuration explicite pour éviter l’erreur Wrangler
 
-Ce dépôt est une **application Cloudflare Pages avec Vite et Pages Functions**. Il ne s'agit pas d'un Worker Vite autonome. Le message Wrangler `Error parsing file: .../vite.config.js` apparaît souvent lorsque le dépôt est lancé avec la commande de déploiement Workers `wrangler deploy` au lieu du flux Pages. Le fichier a été vérifié avec `node --check vite.config.js` : sa syntaxe JavaScript est valide dans cet environnement. Il faut corriger la cible/la commande de déploiement, pas renommer `vite.config.js`.
+Le message `Error parsing file: .../vite.config.js` arrive dans ce journal pendant l’étape de **déploiement Wrangler**. Le projet contient désormais un `wrangler.jsonc` explicite qui indique à Wrangler le vrai point d’entrée (`worker/index.js`) et les fichiers statiques (`dist`). Wrangler n’a ainsi plus besoin de deviner la cible à partir de `vite.config.js`.
 
-### Si le dépôt est connecté dans le tableau de bord Cloudflare Pages
+### Déploiement recommandé pour le pipeline actuel (Workers + Static Assets)
 
-Dans **Workers & Pages → votre projet Pages → Settings → Builds & deployments**, régler :
+Dans Cloudflare Workers Builds, utiliser :
 
-- **Framework preset** : `Vite` (ou `None` si le preset Vite n'est pas proposé) ;
-- **Build command** : `npm run build` ;
-- **Build output directory** : `dist` ;
-- **Root directory** : `/` (la racine de ce dépôt).
+- **Build command** : `npm run build`
+- **Deploy command** : `npx wrangler deploy`
+- **Root directory** : `/`
 
-Laisser Pages effectuer lui-même le déploiement après le build. Ne pas renseigner `wrangler deploy` comme commande de build/déploiement pour ce projet. La fonction `functions/api/hf/[[path]].js` doit rester à la racine du dépôt : Pages la déploie avec le site via l'intégration Git.
+Le `wrangler.jsonc` à la racine configure une application Cloudflare **Worker avec Static Assets**. Le Worker fournit `/api/hf/*` pour le relais des fichiers de modèles ; le reste des requêtes est servi depuis `dist`. Cette configuration correspond au pipeline Wrangler signalé dans votre journal.
 
-### Si le déploiement est fait manuellement avec Wrangler
-
-Utiliser la commande **Pages**, et non celle des Workers :
+En local, on peut lancer :
 
 ```bash
 npm install
 npm run build
-npx wrangler pages deploy dist --project-name NOM_DU_PROJET_PAGES
+npx wrangler deploy
 ```
 
-Remplacer `NOM_DU_PROJET_PAGES` par le nom exact du projet Pages existant. La commande `npm run pages:deploy` est aussi disponible si Wrangler est authentifié et que le nom du projet peut être sélectionné par l'outil.
+Ou utiliser le script `npm run deploy` qui effectue le build puis le déploiement. Il faut être authentifié auprès de Cloudflare et avoir accès au compte/projet ciblé. Si Cloudflare affiche encore une erreur `vite.config.js`, vérifier que le dépôt déployé contient bien `wrangler.jsonc` **et** `worker/index.js`, puis que la commande de déploiement est `npx wrangler deploy` depuis la racine.
 
-### Contrôle après déploiement
+### Variante si vous souhaitez rester sur Cloudflare Pages classique
 
-Ouvrir `https://<votre-domaine>/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais peut joindre Hugging Face. Une réponse 404 indique généralement que la Pages Function n'a pas été déployée ; une réponse 502 indique un problème de sortie réseau du relais.
+Le projet garde également `functions/api/hf/[[path]].js` pour Pages. Dans un véritable projet **Workers & Pages → Pages**, configurez :
+
+- **Build command** : `npm run build`
+- **Build output directory** : `dist`
+- **Root directory** : `/`
+
+Laissez Pages publier automatiquement après le build ; ne configurez pas `wrangler deploy` comme commande de publication. Pour un déploiement manuel Pages, utilisez `npm run pages:deploy` (et choisissez ou ajoutez le nom du projet Pages si Wrangler le demande). Le fichier `wrangler.pages.jsonc` sert de configuration dédiée à ce mode.
+
+**Ne mélangez pas les deux commandes** : `wrangler deploy` déploie la configuration Workers située dans `wrangler.jsonc`, tandis que `wrangler pages deploy` publie un projet Pages.
+
+### Contrôle après publication
+
+Sur le domaine publié, ouvrir `/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais arrive à joindre Hugging Face. Une réponse 404 indique que la route API n’est pas déployée ; une réponse 502 indique un échec du relais vers Hugging Face.
 
 ## Classes détectées et limites
 
