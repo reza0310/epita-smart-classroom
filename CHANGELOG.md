@@ -15,3 +15,12 @@
 - Parsing JSX et transpilation syntaxique réalisés sans diagnostic.
 - Intégrité de l'archive ZIP vérifiée.
 - La compilation complète `npm run build` et un test navigateur de bout en bout n'ont pas pu être réalisés dans l'environnement de génération, car `npm install` a dépassé le délai disponible. Tester sur un navigateur récent et une connexion permettant le téléchargement des modèles avant le déploiement.
+
+## Correctif réseau OWL-ViT / YOLO — relais same-origin
+
+- Ajout d'un relais Cloudflare Pages Function limité aux dépôts publics `Xenova/owlvit-base-patch32` et `onnx-community/yolov10n`; le proxy ne reçoit ni ne transmet les images analysées.
+- Ajout de l'équivalent de relais dans Vite pour le développement local, avec suivi des redirections Hugging Face côté serveur.
+- Configuration de Transformers.js pour charger les poids via `/api/hf/`, afin d'éviter des échecs de requête cross-origin directement depuis le navigateur.
+- Copie au lancement/build des fichiers WASM d'ONNX Runtime vers `public/ort/`; configuration de `wasmPaths` sur la même origine au lieu d'un CDN tiers.
+- Ajout d'un endpoint de diagnostic `/api/hf/_health` et de messages d'erreur indiquant de vérifier les Pages Functions et les fichiers WASM locaux.
+- Le build et le test navigateur complet restent à exécuter après `npm install` dans un environnement disposant du registre npm.

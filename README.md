@@ -24,7 +24,7 @@ npm install
 npm run dev
 ```
 
-Ouvrir l'URL affichée par Vite. L'accès caméra nécessite un contexte sécurisé : `localhost` en local ou HTTPS une fois déployé. Au premier lancement, le navigateur télécharge les bibliothèques et les poids COCO-SSD. OWL-ViT peut être chargé à la demande sur une image fixe ou en activant son option dans le mode vidéo ; ses poids quantifiés représentent environ 155 Mo et nécessitent une connexion au premier chargement. Le navigateur peut ensuite les conserver en cache. YOLOv10n est lui aussi chargé à la demande. Les images caméra ne sont ni téléversées ni enregistrées par l'application.
+Ouvrir l'URL affichée par Vite. L'accès caméra nécessite un contexte sécurisé : `localhost` en local ou HTTPS une fois déployé. Au premier lancement, le navigateur télécharge les bibliothèques et les poids COCO-SSD. OWL-ViT et YOLOv10n sont chargés à la demande. Les requêtes vers les poids des deux modèles passent désormais par `/api/hf/` sur la même origine : Vite fait le relais en développement, et une Cloudflare Pages Function le fait en production. Les fichiers ONNX Runtime/WASM sont copiés depuis `node_modules` vers `public/ort/` au démarrage et au build, évitant le chargement du runtime WASM depuis un CDN tiers. Une connexion est nécessaire au premier téléchargement ; le navigateur peut ensuite conserver les ressources en cache. Les images caméra ne sont ni transmises au relais ni envoyées vers un serveur par l'application.
 
 Pour tester le build de production :
 
@@ -38,7 +38,8 @@ npm run preview
 1. Envoyer ce projet dans un dépôt Git.
 2. Créer un projet Pages et connecter le dépôt.
 3. Commande de build : `npm run build` ; répertoire de sortie : `dist`.
-4. Déployer. Autoriser explicitement la caméra si on choisit le mode caméra.
+4. Déployer. La présence du dossier `functions/api/hf/` est obligatoire pour que les modèles secondaires fonctionnent en production : utilisez une intégration Git ou Wrangler qui déploie aussi les Pages Functions (un simple téléversement du dossier `dist` ne suffit pas).
+5. Après déploiement, ouvrir `https://<votre-domaine>/api/hf/_health`. Une réponse JSON avec `"ok": true` confirme que le relais peut joindre Hugging Face. Une réponse 404 indique généralement que la Pages Function n'a pas été déployée ; une réponse 502 indique un problème de sortie réseau du relais.
 
 ## Classes détectées et limites
 
@@ -50,7 +51,7 @@ Les fenêtres et tableaux ne sont pas des classes natives de COCO-SSD. Activez O
 
 OWL-ViT (`Xenova/owlvit-base-patch32`, Transformers.js) est un détecteur zéro-shot : l’application lui passe des descriptions textuelles préétablies plutôt qu’un nouveau modèle entraîné. Il est chargé à la demande. Le seuil OWL-ViT est distinct du seuil COCO-SSD. L’option active immédiatement le chargement du modèle ; le premier chargement télécharge les poids ONNX quantifiés depuis Hugging Face (environ 155 Mo pour q8) et requiert une connexion. Le pipeline reçoit directement le canvas HTML et laisse Transformers.js gérer la conversion de l’image. Le backend est explicitement configuré sur WASM en quantification q8, le cache navigateur est activé et l’exécution WASM est configurée en mono-thread pour limiter les incompatibilités sur certains appareils. La configuration Vite exclut Transformers.js du pre-bundling et laisse ses ressources WASM/worker en modules ES. En mode vidéo, OWL-ViT s’exécute au maximum toutes les 6,5 secondes et en tâche complémentaire ; COCO-SSD continue de rafraîchir les cadres entre les exécutions OWL-ViT. Les boîtes OWL-ViT sont conservées jusqu’à la détection complémentaire suivante : elles peuvent donc avoir quelques secondes de retard dans une scène mobile.
 
-L’erreur du moteur est affichée avec son détail technique et une action « Réessayer ». Si le chargement reste indisponible, vérifiez dans les outils de développement du navigateur la requête vers Hugging Face et les fichiers ONNX Runtime ; effacez le cache du site en cas de réponse 404 mise en cache et testez un navigateur récent sur ordinateur. Les fichiers q8 pèsent environ 155 Mo, auxquels s’ajoute la mémoire de travail : certains téléphones d’entrée de gamme peuvent échouer par manque de mémoire. Les images envoyées aux détecteurs complémentaires sont réduites à 1 280 pixels sur le grand côté, puis les cadres sont remappés sur la résolution d’origine pour limiter ces risques. OWL-ViT n’est pas un système d’apprentissage manuel : les corrections restent des annotations de jeu de données pour une éventuelle phase d’entraînement séparée. Il ne faut pas interpréter un score faible ou l’absence de cadre comme une preuve que l’objet est absent. Recadrez les personnes hors de l’image avant analyse : comme le modèle encode l’image entière, n’analysez pas de photos contenant des personnes si la contrainte est l’absence totale d’analyse des personnes.
+L’erreur du moteur est affichée avec son détail technique et une action « Réessayer ». Les téléchargements de poids passent par `/api/hf/` sur la même origine, et ONNX Runtime WASM est servi depuis `/ort/` après la copie automatique à l'étape `predev`/`prebuild`. Si OWL-ViT ou YOLO affiche une erreur réseau, ouvrez `/api/hf/_health` sur le même domaine : `ok: true` valide le relais Hugging Face ; 404 indique souvent une Pages Function absente ; 502 signifie que le relais n'a pas pu joindre Hugging Face. Vérifiez aussi que les fichiers `/ort/ort-wasm-*.wasm` et `/ort/ort-wasm-*.mjs` répondent sans 404 dans l'onglet Réseau du navigateur. Les fichiers q8 OWL-ViT pèsent environ 155 Mo, auxquels s’ajoute la mémoire de travail : certains téléphones d’entrée de gamme peuvent échouer par manque de mémoire. Les images envoyées aux détecteurs complémentaires sont réduites à 1 280 pixels sur le grand côté, puis les cadres sont remappés sur la résolution d’origine pour limiter ces risques. OWL-ViT n’est pas un système d’apprentissage manuel : les corrections restent des annotations de jeu de données pour une éventuelle phase d’entraînement séparée. Il ne faut pas interpréter un score faible ou l’absence de cadre comme une preuve que l’objet est absent. Recadrez les personnes hors de l’image avant analyse : comme le modèle encode l’image entière, n’analysez pas de photos contenant des personnes si la contrainte est l’absence totale d’analyse des personnes.
 
 ## Mode scènes denses : YOLOv10n + COCO-SSD par zones
 
@@ -83,6 +84,14 @@ Les images annotées résident dans IndexedDB sur l'appareil. L'export inclut le
 - TensorFlow Object Detection API : <https://github.com/tensorflow/models/tree/master/research/object_detection>
 - Faster R-CNN Model Zoo : <https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/tf2_detection_zoo.md>
 - Configuration Cloudflare Pages : <https://developers.cloudflare.com/pages/configuration/build-configuration/>
+
+## Diagnostic réseau OWL-ViT / YOLO
+
+- Tester le relais en production : `/api/hf/_health`.
+- Les routes du relais n'acceptent que les dépôts publics `Xenova/owlvit-base-patch32` et `onnx-community/yolov10n`, en lecture seule (`GET`/`HEAD`) ; elles ne constituent pas un proxy arbitraire.
+- Le relais ne reçoit pas d'images : seuls les fichiers publics des modèles sont récupérés depuis Hugging Face.
+- Vérifier que `npm run predev` ou `npm run prebuild` a copié les fichiers ONNX Runtime dans `public/ort/`.
+- Sur Cloudflare Pages, déployer le dossier `functions/` en même temps que `dist/`. Le déploiement des seuls fichiers statiques ne mettra pas en place `/api/hf/`.
 
 ## Journal des modifications
 

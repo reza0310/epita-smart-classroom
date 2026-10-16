@@ -405,20 +405,31 @@ function App() {
   const getTransformersModule = async () => {
     if (transformersModuleRef.current) return transformersModuleRef.current;
     const module = await import('@huggingface/transformers');
-    // En application navigateur, les modèles sont récupérés depuis Hugging Face et
-    // le cache navigateur est autorisé. Aucun serveur applicatif ne reçoit les images.
+    // Les poids sont relayés via la même origine : /api/hf/* est traité par
+    // Vite en développement et par une Cloudflare Pages Function en production.
+    // Les images restent dans le navigateur ; seul le téléchargement des modèles est relayé.
     module.env.allowLocalModels = false;
     module.env.allowRemoteModels = true;
+    module.env.remoteHost = new URL('/api/hf/', window.location.origin).href;
+    module.env.remotePathTemplate = '{model}/resolve/{revision}/';
     module.env.useBrowserCache = true;
-    // Le mono-thread WASM évite des pannes de Worker / SharedArrayBuffer sur certains navigateurs mobiles.
-    if (module.env.backends?.onnx?.wasm) module.env.backends.onnx.wasm.numThreads = 1;
+    // Les binaires ONNX Runtime sont copiés localement dans public/ort pendant predev/prebuild.
+    // Cela évite également la récupération de WASM depuis un CDN tiers.
+    if (module.env.backends?.onnx?.wasm) {
+      module.env.backends.onnx.wasm.wasmPaths = new URL('/ort/', window.location.origin).href;
+      module.env.backends.onnx.wasm.numThreads = 1;
+    }
     transformersModuleRef.current = module;
     return module;
   };
 
   const friendlyModelError = (error, modelName) => {
     const detail = String(error?.message || error || 'Erreur inconnue').replace(/\s+/g, ' ').slice(0, 360);
-    return `${modelName} n’a pas pu être chargé ou exécuté. Vérifiez la connexion, l’espace mémoire disponible et le chargement des fichiers du modèle. Détail : ${detail}`;
+    const networkFailure = /NetworkError|Failed to fetch|fetch failed|Load failed|ERR_NETWORK|CORS/i.test(detail);
+    const hint = networkFailure
+      ? ' Le relais local /api/hf/ ou les fichiers ONNX Runtime /ort/ sont inaccessibles. Vérifiez le déploiement des Cloudflare Pages Functions, puis ouvrez /api/hf/_health dans le même domaine.'
+      : ' Vérifiez la mémoire disponible et le format des fichiers du modèle.';
+    return `${modelName} n’a pas pu être chargé ou exécuté.${hint} Détail : ${detail}`;
   };
 
   const loadOwlModel = async () => {
