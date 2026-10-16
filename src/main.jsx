@@ -13,7 +13,7 @@ const CATEGORIES = [
   {
     id: 'table', label: 'Tables & bureaux', singular: 'Table / bureau', modelClass: 'dining table', method: 'auto',
     expectedDefault: '1', color: '#70b8ff', symbol: 'table', family: 'Mobilier',
-    detail: 'COCO-SSD détecte surtout les tables de repas ; un bureau peut être manqué.',
+    detail: 'COCO-SSD détecte surtout les tables de repas ; OWL-ViT peut proposer des bureaux sur image fixe.',
   },
   {
     id: 'laptop', label: 'Ordinateurs portables', singular: 'Ordinateur portable', modelClass: 'laptop', method: 'auto',
@@ -28,12 +28,12 @@ const CATEGORIES = [
   {
     id: 'board', label: 'Tableaux', singular: 'Tableau', method: 'manual',
     expectedDefault: '1', color: '#f7db65', symbol: 'board', family: 'Éléments de salle',
-    detail: 'Non reconnu nativement par COCO-SSD — relevé manuel.',
+    detail: 'OWL-ViT peut proposer des cadres ; confirmation humaine recommandée.',
   },
   {
     id: 'window', label: 'Fenêtres', singular: 'Fenêtre', method: 'manual',
     expectedDefault: '2', color: '#79d9de', symbol: 'window', family: 'Éléments de salle',
-    detail: 'Non reconnu nativement par COCO-SSD — relevé manuel.',
+    detail: 'OWL-ViT peut proposer des cadres ; confirmation humaine recommandée.',
   },
   {
     id: 'anomaly', label: 'Anomalies visuelles', singular: 'Anomalie', method: 'manual',
@@ -43,9 +43,24 @@ const CATEGORIES = [
 ];
 
 const AUTO_IDS = CATEGORIES.filter((c) => c.method === 'auto').map((c) => c.id);
+const OWL_IDS = ['table', 'board', 'window'];
+// Les libellés décrivent uniquement du mobilier et des éléments de salle ; aucune classe personne n'est proposée.
+const OWL_PROMPTS = [
+  { prompt: 'a whiteboard', categoryId: 'board' },
+  { prompt: 'a classroom whiteboard', categoryId: 'board' },
+  { prompt: 'a chalkboard', categoryId: 'board' },
+  { prompt: 'a blackboard mounted on a wall', categoryId: 'board' },
+  { prompt: 'a window', categoryId: 'window' },
+  { prompt: 'a window in a room', categoryId: 'window' },
+  { prompt: 'an office desk', categoryId: 'table' },
+  { prompt: 'a computer desk', categoryId: 'table' },
+  { prompt: 'a work desk', categoryId: 'table' },
+  { prompt: 'a table in a room', categoryId: 'table' },
+];
+const OWL_CATEGORY_IDS = new Set(OWL_IDS);
 const INITIAL_EXPECTED = Object.fromEntries(CATEGORIES.map((category) => [category.id, category.expectedDefault]));
 const EMPTY_MANUAL = { board: '', window: '', anomaly: '' };
-const EMPTY_COUNTS = Object.fromEntries(AUTO_IDS.map((id) => [id, 0]));
+const EMPTY_COUNTS = Object.fromEntries(CATEGORIES.map((category) => [category.id, 0]));
 
 function Icon({ name, size = 20, strokeWidth = 1.8 }) {
   const paths = {
@@ -79,10 +94,12 @@ function getValue(value) {
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
 }
 
-function makeRows(expectedValues, autoCounts, manualCounts, observed, snapshotMode = false) {
+function makeRows(expectedValues, autoCounts, manualCounts, observed, snapshotMode = false, owlObserved = false) {
   return CATEGORIES.map((category) => {
     const expected = getValue(expectedValues[category.id]);
-    const detected = category.method === 'auto'
+    const owlUsed = Boolean(owlObserved && OWL_CATEGORY_IDS.has(category.id));
+    const machineChecked = category.method === 'auto' || owlUsed;
+    const detected = machineChecked
       ? (observed ? (autoCounts[category.id] ?? 0) : null)
       : getValue(manualCounts[category.id]);
     let status = 'En attente';
@@ -93,29 +110,29 @@ function makeRows(expectedValues, autoCounts, manualCounts, observed, snapshotMo
     if (expected === null) {
       status = 'Objectif à définir';
       statusType = 'pending';
-    } else if (category.method === 'auto' && detected === null) {
-      status = snapshotMode ? 'Non relevé par la caméra' : 'En attente de la caméra';
+    } else if (machineChecked && detected === null) {
+      status = snapshotMode ? 'Non relevé par le modèle' : 'En attente d’une analyse';
       statusType = 'pending';
-    } else if (category.method === 'manual' && detected === null) {
+    } else if (!machineChecked && detected === null) {
       status = 'Relevé manuel requis';
       statusType = 'pending';
-    } else if (category.method === 'auto' && detected === 0) {
+    } else if (machineChecked && detected === 0) {
       status = expected > 0 ? '0 détecté · à confirmer' : '0 détecté · à vérifier';
       statusType = 'caution';
-      note = 'Une absence de détection ne prouve pas l’absence de l’objet ; vérifier le cadrage et les éventuels masquages.';
+      note = 'Une absence de détection ne prouve pas l’absence de l’objet ; vérifier le cadrage, les occultations et les faux négatifs.';
     } else if (detected === expected) {
       status = 'Concordant au relevé';
       statusType = 'good';
     } else {
       gap = detected - expected;
-      status = category.method === 'manual' ? 'Écart relevé manuellement' : 'Écart de comptage observé';
+      status = machineChecked ? 'Écart de comptage observé' : 'Écart relevé manuellement';
       statusType = 'bad';
-      note = category.method === 'auto'
-        ? 'Le nombre détecté diffère de l’attendu ; vérifier le cadrage et les objets masqués.'
+      note = machineChecked
+        ? 'Le nombre détecté diffère de l’attendu ; vérifier les cadres, les occultations et les éventuels doublons.'
         : 'Écart déclaré lors du contrôle manuel.';
     }
 
-    return { ...category, expected, detected, gap, status, statusType, note };
+    return { ...category, expected, detected, gap, status, statusType, note, machineChecked, owlUsed };
   });
 }
 
@@ -252,6 +269,9 @@ function App() {
   const datasetInputRef = useRef(null);
   const drawStartRef = useRef(null);
   const modelRef = useRef(null);
+  const owlModelRef = useRef(null);
+  const owlLoadPromiseRef = useRef(null);
+  const owlThresholdRef = useRef(0.12);
   const busyRef = useRef(false);
   const thresholdRef = useRef(0.55);
   const [stream, setStream] = useState(null);
@@ -259,6 +279,13 @@ function App() {
   const [model, setModel] = useState(null);
   const [modelStatus, setModelStatus] = useState('idle');
   const [modelError, setModelError] = useState('');
+  const [owlModelStatus, setOwlModelStatus] = useState('idle');
+  const [owlModelError, setOwlModelError] = useState('');
+  const [owlProgress, setOwlProgress] = useState(0);
+  const [owlEnabled, setOwlEnabled] = useState(false);
+  const [owlThreshold, setOwlThreshold] = useState(0.12);
+  const [owlObserved, setOwlObserved] = useState(false);
+  const [imageOwlObserved, setImageOwlObserved] = useState(false);
   const [cameraError, setCameraError] = useState('');
   const [threshold, setThreshold] = useState(0.55);
   const [objects, setObjects] = useState([]);
@@ -284,6 +311,7 @@ function App() {
   const [datasetBusy, setDatasetBusy] = useState(false);
 
   thresholdRef.current = threshold;
+  owlThresholdRef.current = owlThreshold;
 
   useEffect(() => {
     let active = true;
@@ -337,6 +365,89 @@ function App() {
     await loadDetectionModel();
   };
 
+  const loadOwlModel = async () => {
+    if (owlModelRef.current) return owlModelRef.current;
+    if (owlLoadPromiseRef.current) return owlLoadPromiseRef.current;
+    setOwlModelStatus('loading');
+    setOwlModelError('');
+    setOwlProgress(0);
+    owlLoadPromiseRef.current = (async () => {
+      try {
+        const { pipeline, env } = await import('@huggingface/transformers');
+        // Ce modèle n'est chargé que si l'utilisateur demande OWL-ViT pour une image fixe.
+        env.allowLocalModels = false;
+        const detector = await pipeline('zero-shot-object-detection', 'Xenova/owlvit-base-patch32', {
+          dtype: 'q8',
+          progress_callback: (progress) => {
+            if (progress?.status === 'progress' && Number.isFinite(progress.progress)) {
+              setOwlProgress(Math.max(0, Math.min(100, Math.round(progress.progress))));
+            }
+          },
+        });
+        owlModelRef.current = detector;
+        setOwlModelStatus('ready');
+        setOwlProgress(100);
+        return detector;
+      } catch (error) {
+        console.error('OWL-ViT load error', error);
+        setOwlModelStatus('error');
+        setOwlModelError('OWL-ViT n’a pas pu être téléchargé ou initialisé. Vérifiez la connexion et réessayez.');
+        throw error;
+      } finally {
+        owlLoadPromiseRef.current = null;
+      }
+    })();
+    return owlLoadPromiseRef.current;
+  };
+
+  const detectWithOwl = async (canvas) => {
+    const detector = await loadOwlModel();
+    const outputs = await detector(canvas, OWL_PROMPTS.map((item) => item.prompt), {
+      threshold: owlThresholdRef.current,
+      top_k: 40,
+    });
+    return outputs.map((prediction, index) => {
+      const prompt = OWL_PROMPTS.find((item) => item.prompt === prediction.label);
+      if (!prompt) return null;
+      const category = CATEGORIES.find((item) => item.id === prompt.categoryId);
+      const box = prediction.box || {};
+      const xmin = Math.max(0, Math.min(canvas.width, Number(box.xmin) || 0));
+      const ymin = Math.max(0, Math.min(canvas.height, Number(box.ymin) || 0));
+      const xmax = Math.max(xmin, Math.min(canvas.width, Number(box.xmax) || 0));
+      const ymax = Math.max(ymin, Math.min(canvas.height, Number(box.ymax) || 0));
+      if (xmax - xmin < 4 || ymax - ymin < 4) return null;
+      return {
+        id: `owl-${prompt.categoryId}-${index}`,
+        categoryId: prompt.categoryId,
+        label: category.label,
+        color: category.color,
+        score: Number(prediction.score) || 0,
+        bbox: [xmin, ymin, xmax - xmin, ymax - ymin],
+        source: 'OWL-ViT',
+      };
+    }).filter(Boolean);
+  };
+
+  const boxIoU = (boxA, boxB) => {
+    const left = Math.max(boxA[0], boxB[0]);
+    const top = Math.max(boxA[1], boxB[1]);
+    const right = Math.min(boxA[0] + boxA[2], boxB[0] + boxB[2]);
+    const bottom = Math.min(boxA[1] + boxA[3], boxB[1] + boxB[3]);
+    const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+    const union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - intersection;
+    return union > 0 ? intersection / union : 0;
+  };
+
+  const suppressDuplicateBoxes = (detections, iouThreshold = 0.52) => {
+    const sorted = [...detections].sort((a, b) => b.score - a.score);
+    const kept = [];
+    sorted.forEach((candidate) => {
+      const duplicate = kept.some((accepted) => accepted.categoryId === candidate.categoryId && boxIoU(accepted.bbox, candidate.bbox) >= iouThreshold);
+      if (!duplicate) kept.push(candidate);
+    });
+    return kept;
+  };
+
   const handleImageUpload = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -379,6 +490,8 @@ function App() {
       setLastInferenceAt(null);
       setImageAnnotations([]);
       setImageAnalyzed(false);
+      setOwlObserved(false);
+      setImageOwlObserved(false);
       setPendingBox(null);
       setAnnotationMode(false);
       setNotice(`Image préparée localement (${width} × ${height} px${scale < 1 ? ', réduite pour les performances mobiles' : ''}). Analysez-la, puis dessinez des cadres pour corriger ou ajouter des annotations.`);
@@ -395,12 +508,12 @@ function App() {
     if (!modelRef.current && !(await loadDetectionModel())) return;
     setDatasetBusy(true);
     setModelError('');
+    setOwlModelError('');
     try {
       const image = await loadImageElement(selectedImage.dataUrl);
-      // COCO-SSD is multi-class. Only equipment classes are kept in the application state;
-      // crop photos to equipment only when compliance requires no person analysis.
+      // COCO-SSD is multi-class; this application only keeps its authorized equipment classes.
       const predictions = await modelRef.current.detect(image, 40, thresholdRef.current);
-      const equipment = predictions
+      const cocoEquipment = predictions
         .filter((prediction) => AUTO_IDS.some((id) => CATEGORIES.find((category) => category.id === id)?.modelClass === prediction.class))
         .map((prediction, index) => {
           const category = CATEGORIES.find((item) => item.modelClass === prediction.class);
@@ -411,17 +524,43 @@ function App() {
             color: category.color,
             score: prediction.score,
             bbox: prediction.bbox,
+            source: 'COCO-SSD',
           };
         });
+
+      let owlEquipment = [];
+      let owlSucceeded = false;
+      if (owlEnabled) {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = selectedImage.width;
+          canvas.height = selectedImage.height;
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Le navigateur ne peut pas préparer l’image pour OWL-ViT.');
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          owlEquipment = await detectWithOwl(canvas);
+          owlSucceeded = true;
+        } catch (owlError) {
+          console.error('OWL-ViT image detection error', owlError);
+          // Keep COCO-SSD results usable even when the optional larger model fails.
+        }
+      }
+      const equipment = suppressDuplicateBoxes([...cocoEquipment, ...owlEquipment]);
       const nextCounts = { ...EMPTY_COUNTS };
-      equipment.forEach((object) => { nextCounts[object.categoryId] += 1; });
+      equipment.forEach((object) => { nextCounts[object.categoryId] = (nextCounts[object.categoryId] || 0) + 1; });
       setImagePredictions(equipment);
       setObjects(equipment);
       setCounts(nextCounts);
       setHasObservedFrame(true);
+      setOwlObserved(owlSucceeded);
+      setImageOwlObserved(owlSucceeded);
       setImageAnalyzed(true);
       setLastInferenceAt(new Date().toISOString());
-      setNotice(`${equipment.length} détection(s) d’équipement sur l’image fixe. Les objets non reconnus restent à vérifier manuellement.`);
+      if (owlEnabled && !owlSucceeded) {
+        setNotice(`COCO-SSD : ${cocoEquipment.length} détection(s). OWL-ViT n’a pas pu aboutir ; les tableaux et fenêtres restent à confirmer manuellement.`);
+      } else {
+        setNotice(`${equipment.length} détection(s) sur l’image fixe${owlSucceeded ? ' avec fusion COCO-SSD + OWL-ViT' : ' avec COCO-SSD'}. Confirmez les cadres, surtout pour les tableaux, fenêtres et bureaux.`);
+      }
     } catch (error) {
       console.error('Fixed-image detection error', error);
       setModelError('La détection sur cette image a échoué. Essayez une image moins volumineuse ou un autre format.');
@@ -597,6 +736,8 @@ function App() {
     setCounts({ ...EMPTY_COUNTS });
     setHasObservedFrame(false);
     setImageAnalyzed(false);
+    setOwlObserved(false);
+    setImageOwlObserved(false);
     setImageAnnotations(sample.annotations.map((annotation, index) => {
       const category = CATEGORIES.find((item) => item.id === annotation.categoryId);
       return {
@@ -781,12 +922,12 @@ function App() {
   }, [selectedImage, imagePredictions, imageAnnotations, pendingBox, annotationCategory, sourceMode]);
 
   const liveRows = useMemo(
-    () => makeRows(expected, counts, manual, hasObservedFrame, false),
-    [expected, counts, manual, hasObservedFrame],
+    () => makeRows(expected, counts, manual, hasObservedFrame, false, owlObserved),
+    [expected, counts, manual, hasObservedFrame, owlObserved],
   );
   const snapshotRows = useMemo(() => {
     if (!auditSnapshot) return null;
-    return makeRows(auditSnapshot.expected, auditSnapshot.autoCounts, auditSnapshot.manualCounts, auditSnapshot.observed, true);
+    return makeRows(auditSnapshot.expected, auditSnapshot.autoCounts, auditSnapshot.manualCounts, auditSnapshot.observed, true, Boolean(auditSnapshot.owlObserved));
   }, [auditSnapshot]);
   const liveSummary = useMemo(() => summarize(liveRows), [liveRows]);
   const reportSummary = useMemo(() => summarize(snapshotRows || liveRows), [snapshotRows, liveRows]);
@@ -798,8 +939,10 @@ function App() {
       autoCounts: { ...counts },
       manualCounts: { ...manual },
       observed: hasObservedFrame,
+      owlObserved,
+      owlThreshold,
       threshold,
-      model: 'COCO-SSD · lite_mobilenet_v2',
+      model: owlObserved ? 'COCO-SSD + OWL-ViT · owlvit-base-patch32' : 'COCO-SSD · lite_mobilenet_v2',
       source: sourceMode === 'image' ? `Image fixe : ${selectedImage?.name || 'image importée'}` : 'Caméra / dernière image vidéo',
     };
     setAuditSnapshot(snapshot);
@@ -814,8 +957,9 @@ function App() {
       application: 'Atlas — Audit visuel',
       generatedAt: new Date().toISOString(),
       auditCapturedAt: auditSnapshot?.createdAt || null,
-      model: auditSnapshot?.model || 'COCO-SSD · lite_mobilenet_v2',
+      model: auditSnapshot?.model || (owlObserved ? 'COCO-SSD + OWL-ViT · owlvit-base-patch32' : 'COCO-SSD · lite_mobilenet_v2'),
       confidenceThreshold: auditSnapshot?.threshold ?? threshold,
+      owlConfidenceThreshold: auditSnapshot?.owlThreshold ?? (owlObserved ? owlThreshold : null),
       globalStatus: summary.status,
       summary: {
         totalObjectsReported: summary.total,
@@ -826,7 +970,7 @@ function App() {
       },
       rows: rows.map((row) => ({
         category: row.label,
-        method: row.method === 'auto' ? 'COCO-SSD (automatique)' : 'Déclaration manuelle',
+        method: row.machineChecked ? (row.owlUsed ? (row.method === 'auto' ? 'COCO-SSD + OWL-ViT (automatique, à confirmer)' : 'OWL-ViT (automatique, à confirmer)') : 'COCO-SSD (automatique)') : 'Déclaration manuelle',
         expected: row.expected,
         detectedOrRecorded: row.detected,
         gapDetectedMinusExpected: row.gap,
@@ -909,8 +1053,8 @@ function App() {
               <div className={`live-indicator ${cameraOn && sourceMode === 'camera' ? 'is-live' : ''}`}><span />{sourceMode === 'image' ? 'IMAGE FIXE' : cameraOn ? 'EN DIRECT' : 'À L’ARRÊT'}</div>
             </div>
             <div className="source-tabs" role="tablist" aria-label="Source visuelle">
-              <button className={sourceMode === 'camera' ? 'source-tab active' : 'source-tab'} onClick={() => { setSourceMode('camera'); setAnnotationMode(false); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); if (cameraOn) setNotice('La caméra est sélectionnée.'); }} role="tab" aria-selected={sourceMode === 'camera'}><Icon name="camera" size={16} /> Caméra / vidéo</button>
-              <button className={sourceMode === 'image' ? 'source-tab active' : 'source-tab'} onClick={() => { if (cameraOn) stopCamera(); setSourceMode('image'); setAnnotationMode(false); const restoredCounts = { ...EMPTY_COUNTS }; imagePredictions.forEach((object) => { restoredCounts[object.categoryId] += 1; }); setObjects(imagePredictions); setCounts(restoredCounts); setHasObservedFrame(Boolean(imageAnalyzed)); setLastInferenceAt(imageAnalyzed ? lastInferenceAt : null); }} role="tab" aria-selected={sourceMode === 'image'}><Icon name="report" size={16} /> Image téléchargée</button>
+              <button className={sourceMode === 'camera' ? 'source-tab active' : 'source-tab'} onClick={() => { setSourceMode('camera'); setOwlObserved(false); setAnnotationMode(false); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); if (cameraOn) setNotice('La caméra est sélectionnée.'); }} role="tab" aria-selected={sourceMode === 'camera'}><Icon name="camera" size={16} /> Caméra / vidéo</button>
+              <button className={sourceMode === 'image' ? 'source-tab active' : 'source-tab'} onClick={() => { if (cameraOn) stopCamera(); setSourceMode('image'); setOwlObserved(Boolean(imageOwlObserved)); setAnnotationMode(false); const restoredCounts = { ...EMPTY_COUNTS }; imagePredictions.forEach((object) => { restoredCounts[object.categoryId] += 1; }); setObjects(imagePredictions); setCounts(restoredCounts); setHasObservedFrame(Boolean(imageAnalyzed)); setLastInferenceAt(imageAnalyzed ? lastInferenceAt : null); }} role="tab" aria-selected={sourceMode === 'image'}><Icon name="report" size={16} /> Image téléchargée</button>
             </div>
             {sourceMode === 'camera' ? <>
             <div className={`video-stage ${cameraOn ? 'video-active' : ''}`}>
@@ -951,9 +1095,28 @@ function App() {
                   <span className="image-detection-badge">{imageAnalyzed ? `${imagePredictions.length} détection(s) IA` : 'Pas encore analysée'}</span>
                 </div>
                 <div className="fixed-image-controls">
-                  <button className="button button-primary" onClick={analyzeFixedImage} disabled={datasetBusy || modelStatus === 'loading'}><Icon name="target" size={17} />{datasetBusy ? 'Traitement…' : 'Analyser l’image'}</button>
-                  <button className="button button-secondary" onClick={() => { setSelectedImage(null); setImagePredictions([]); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); setImageAnnotations([]); setImageAnalyzed(false); setAnnotationMode(false); setPendingBox(null); setEditingSampleId(null); }}><Icon name="close" size={16} /> Retirer l’image</button>
+                  <button className="button button-primary" onClick={analyzeFixedImage} disabled={datasetBusy || modelStatus === 'loading' || owlModelStatus === 'loading'}><Icon name="target" size={17} />{datasetBusy ? 'Traitement…' : owlEnabled ? 'Analyser avec COCO-SSD + OWL-ViT' : 'Analyser l’image'}</button>
+                  <button className="button button-secondary" onClick={() => { setSelectedImage(null); setImagePredictions([]); setObjects([]); setCounts({ ...EMPTY_COUNTS }); setHasObservedFrame(false); setLastInferenceAt(null); setImageAnnotations([]); setImageAnalyzed(false); setOwlObserved(false); setImageOwlObserved(false); setAnnotationMode(false); setPendingBox(null); setEditingSampleId(null); }}><Icon name="close" size={16} /> Retirer l’image</button>
                 </div>
+                <section className="owlvit-card" aria-label="Détection complémentaire OWL-ViT">
+                  <label className="owlvit-toggle">
+                    <input type="checkbox" checked={owlEnabled} onChange={(event) => setOwlEnabled(event.target.checked)} />
+                    <span className="owlvit-toggle-copy"><strong>Ajouter OWL-ViT pour tableaux, fenêtres et bureaux</strong><small>Détection zéro-shot complémentaire sur cette image fixe ; les résultats restent à confirmer.</small></span>
+                  </label>
+                  <p className="owlvit-disclosure">Le modèle est chargé uniquement lorsque vous l’activez et lancez l’analyse. Le premier téléchargement est volumineux (environ 155 Mo pour les poids quantifiés) ; il peut être mis en cache par le navigateur. L’image elle-même est traitée localement.</p>
+                  {owlEnabled && <>
+                    <div className="confidence-control owlvit-threshold">
+                      <div className="confidence-heading"><label htmlFor="owl-threshold">Seuil OWL-ViT</label><strong>{Math.round(owlThreshold * 100)}%</strong></div>
+                      <input id="owl-threshold" type="range" min="0.05" max="0.5" step="0.01" value={owlThreshold} onChange={(event) => setOwlThreshold(Number(event.target.value))} />
+                      <div className="range-scale"><span>Plus de propositions</span><span>Plus strict</span></div>
+                    </div>
+                    <div className={`owlvit-status owlvit-${owlModelStatus}`} role="status">
+                      {owlModelStatus === 'loading' ? `Téléchargement / initialisation OWL-ViT… ${owlProgress}%` : owlModelStatus === 'ready' ? 'OWL-ViT chargé · prêt pour l’image fixe' : owlModelStatus === 'error' ? 'OWL-ViT indisponible' : 'OWL-ViT sera chargé au lancement de l’analyse.'}
+                    </div>
+                    {owlModelStatus === 'loading' && <div className="owlvit-progress"><span style={{ width: `${owlProgress}%` }} /></div>}
+                    {owlModelError && <div className="inline-error" role="alert"><Icon name="alert" size={16} />{owlModelError}<button className="text-button" onClick={() => { setOwlModelStatus('idle'); setOwlModelError(''); analyzeFixedImage(); }}>Réessayer</button></div>}
+                  </>}
+                </section>
               </> : <div className="image-empty-state"><Icon name="report" size={25} /><strong>Importez une image d’inspection</strong><span>La détection des objets s’effectue localement dans le navigateur, sans envoi du fichier.</span><button className="text-button" onClick={() => fileInputRef.current?.click()}>Parcourir les fichiers <Icon name="arrow" size={14} /></button></div>}
               {modelError && <div className="inline-error" role="alert"><Icon name="alert" size={17} />{modelError}<button className="text-button" onClick={retryModelLoad}>Réessayer</button></div>}
               <div className="confidence-control image-threshold">
@@ -961,7 +1124,7 @@ function App() {
                 <input id="confidence-image" type="range" min="0.2" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} />
                 <div className="range-scale"><span>Plus de détections</span><span>Plus strict</span></div>
               </div>
-              <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Importez une image cadrée sur les équipements.</strong> COCO-SSD est multi-classes même si l’application filtre ses résultats ; pour une exigence stricte, recadrez la photo afin qu’aucune personne ne figure dans l’image analysée.</p></div>
+              <div className="privacy-warning"><Icon name="shield" size={16} /><p><strong>Importez une image cadrée sur les équipements uniquement.</strong> COCO-SSD et OWL-ViT calculent sur les pixels de l’image, même si l’application n’affiche que des catégories autorisées. Pour respecter strictement l’exclusion des personnes, recadrez la photo avant analyse afin qu’aucune personne ne figure dans l’image.</p></div>
             </>}
           </article>
 
@@ -973,12 +1136,15 @@ function App() {
             <p className="panel-subtitle">Comptage des objets visibles dans la dernière image traitée, pas un inventaire garanti de toute la pièce.</p>
             <div className="category-count-list">
               {CATEGORIES.map((category) => {
-                const count = category.method === 'auto'
-                  ? (hasObservedFrame ? counts[category.id] : null)
+                const owlCategoryChecked = owlObserved && OWL_CATEGORY_IDS.has(category.id);
+                const machineCount = category.method === 'auto' || owlCategoryChecked;
+                const count = machineCount
+                  ? (hasObservedFrame ? (counts[category.id] ?? 0) : null)
                   : getValue(manual[category.id]);
+                const sourceLabel = category.method === 'auto' ? (owlObserved && category.id === 'table' ? 'COCO-SSD + OWL-ViT' : 'COCO-SSD') : owlCategoryChecked ? 'OWL-ViT · à confirmer' : 'Relevé manuel';
                 return <div className="category-count-row" key={category.id}>
                   <CategoryIcon category={category} />
-                  <div className="category-count-info"><span>{category.label}</span><small>{category.method === 'auto' ? 'COCO-SSD' : 'Relevé manuel'}</small></div>
+                  <div className="category-count-info"><span>{category.label}</span><small>{sourceLabel}</small></div>
                   <span className={`category-count-value ${count > 0 ? 'has-count' : ''}`}>{count === null ? '—' : count}</span>
                 </div>;
               })}
@@ -989,7 +1155,7 @@ function App() {
                 {objects.length === 0 ? <div className="empty-objects"><span className="empty-ring"><Icon name="target" size={20} /></span><strong>{hasObservedFrame ? 'Aucun équipement reconnu' : 'En attente d’une image'}</strong><span>{hasObservedFrame ? 'Cela ne prouve pas que les équipements sont absents.' : 'Démarrez la caméra pour lancer la détection.'}</span></div> : objects.map((object, index) => <div className="object-row" key={object.id}>
                   <span className="object-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="object-mark" style={{ background: object.color }} />
-                  <div className="object-info"><strong>{object.label}</strong><small>Objet {index + 1}</small></div>
+                  <div className="object-info"><strong>{object.label}</strong><small>Objet {index + 1}{object.source ? ` · ${object.source}` : ''}</small></div>
                   <span className="confidence-score">{Math.round(object.score * 100)}%</span>
                 </div>)}
               </div>
@@ -1039,7 +1205,7 @@ function App() {
               <thead><tr><th>Catégorie</th><th>Mode de vérification</th><th>Nombre attendu</th><th>Relevé manuel</th><th>Observation</th></tr></thead>
               <tbody>{CATEGORIES.map((category) => <tr key={category.id}>
                 <td><div className="table-category"><CategoryIcon category={category} size={18} /><span>{category.label}</span></div></td>
-                <td><span className={`method-tag ${category.method}`}>{category.method === 'auto' ? 'IA · COCO-SSD' : 'Contrôle humain'}</span></td>
+                <td><span className={`method-tag ${category.method}`}>{category.method === 'auto' ? (category.id === 'table' ? 'IA · COCO-SSD / OWL-ViT' : 'IA · COCO-SSD') : (OWL_CATEGORY_IDS.has(category.id) ? 'OWL-ViT optionnel / humain' : 'Contrôle humain')}</span></td>
                 <td><label className="number-input"><input type="number" inputMode="numeric" min="0" step="1" value={expected[category.id]} onChange={(event) => updateExpected(category.id, event.target.value)} aria-label={`Nombre attendu : ${category.label}`} /><span>obj.</span></label></td>
                 <td>{category.method === 'manual' ? <label className="number-input manual-number"><input type="number" inputMode="numeric" min="0" step="1" placeholder="—" value={manual[category.id]} onChange={(event) => updateManual(category.id, event.target.value)} aria-label={`Relevé manuel : ${category.label}`} /><span>obj.</span></label> : <span className="not-applicable">Auto</span>}</td>
                 <td><span className="table-detail">{category.detail}</span></td>
@@ -1054,7 +1220,7 @@ function App() {
 
         <section className="method-strip">
           <div className="method-strip-icon"><Icon name="info" size={20} /></div>
-          <div><h3>À propos de la méthode</h3><p>COCO-SSD est un détecteur pré-entraîné, pas un modèle réentraîné sur votre salle. Le seuil modifie les sorties conservées, mais ne crée pas de nouvelles capacités de détection.</p></div>
+          <div><h3>À propos de la méthode</h3><p>COCO-SSD reste actif en caméra. Sur une image fixe, OWL-ViT peut proposer en zéro-shot des cadres pour tableaux, fenêtres et bureaux. Ce n’est pas un entraînement local : vérifiez les résultats et annotez les erreurs.</p></div>
           <button className="text-button" onClick={() => setShowMethodNotes((value) => !value)}>{showMethodNotes ? 'Réduire' : 'Limites & confidentialité'} <Icon name={showMethodNotes ? 'close' : 'arrow'} size={15} /></button>
         </section>
         {showMethodNotes && <section className="expanded-method panel">
@@ -1074,12 +1240,12 @@ function App() {
           <div className="report-status-pattern" aria-hidden="true"><span /><span /><span /><span /><span /><span /><span /><span /><span /></div>
         </section>
         <section className="report-table-section panel">
-          <div className="panel-heading report-table-heading"><div><div className="section-kicker">DÉTAIL PAR RÈGLE</div><h2>Attendu vs relevé</h2></div><span className="report-threshold">Seuil de confiance : <strong>{Math.round((auditSnapshot?.threshold ?? threshold) * 100)}%</strong></span></div>
+          <div className="panel-heading report-table-heading"><div><div className="section-kicker">DÉTAIL PAR RÈGLE</div><h2>Attendu vs relevé</h2></div><span className="report-threshold">Seuil COCO-SSD : <strong>{Math.round((auditSnapshot?.threshold ?? threshold) * 100)}%</strong>{(auditSnapshot?.owlObserved ?? owlObserved) && <> · OWL-ViT : <strong>{Math.round((auditSnapshot?.owlThreshold ?? owlThreshold) * 100)}%</strong></>}</span></div>
           <div className="report-table-wrap"><table className="report-table">
             <thead><tr><th>Catégorie</th><th>Mode</th><th>Attendu</th><th>Détecté / relevé</th><th>Écart*</th><th>Statut de vérification</th></tr></thead>
             <tbody>{pageRows.map((row) => <tr key={row.id}>
               <td><div className="table-category"><CategoryIcon category={row} size={18} /><div><strong>{row.label}</strong><small>{row.detail}</small></div></div></td>
-              <td><span className={`method-tag ${row.method}`}>{row.method === 'auto' ? 'Automatique' : 'Manuel'}</span></td>
+              <td><span className={`method-tag ${row.machineChecked ? 'auto' : 'manual'}`}>{row.machineChecked ? (row.owlUsed ? (row.method === 'auto' ? 'COCO + OWL-ViT' : 'OWL-ViT') : 'Automatique') : 'Manuel'}</span></td>
               <td className="number-cell">{row.expected === null ? '—' : row.expected}</td>
               <td className="number-cell">{row.detected === null ? '—' : row.detected}</td>
               <td className={`gap-cell ${row.gap > 0 ? 'gap-positive' : row.gap < 0 ? 'gap-negative' : ''}`}>{row.gap === null ? '—' : row.gap > 0 ? `+${row.gap}` : row.gap}</td>
