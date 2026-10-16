@@ -10,7 +10,8 @@
     "predev": "node scripts/copy-ort-assets.mjs",
     "prebuild": "node scripts/copy-ort-assets.mjs",
     "pages:deploy": "npm run build && wrangler pages deploy dist --config wrangler.pages.jsonc",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && node scripts/verify-dist.mjs && wrangler deploy",
+    "deploy:workers": "npm run deploy"
   },
   "dependencies": {
     "@tensorflow-models/coco-ssd": "^2.2.3",

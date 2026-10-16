@@ -33,41 +33,35 @@ npm run build
 npm run preview
 ```
 
-## Déploiement Cloudflare — configuration explicite pour éviter l’erreur Wrangler
+## Déploiement Cloudflare — correction de `assets.directory ... /dist` introuvable
 
-Le message `Error parsing file: .../vite.config.js` arrive dans ce journal pendant l’étape de **déploiement Wrangler**. Le projet contient désormais un `wrangler.jsonc` explicite qui indique à Wrangler le vrai point d’entrée (`worker/index.js`) et les fichiers statiques (`dist`). Wrangler n’a ainsi plus besoin de deviner la cible à partir de `vite.config.js`.
+L’erreur `The directory specified by the "assets.directory" field ... /dist does not exist` signifie que Wrangler démarre le déploiement avant que le build Vite ait créé `dist/index.html`. Le dossier `dist` est un artefact généré : il n’est volontairement pas stocké dans Git ni dans l’archive source.
 
-### Déploiement recommandé pour le pipeline actuel (Workers + Static Assets)
+### Réglage recommandé si le projet est connecté à Cloudflare Workers Builds
 
-Dans Cloudflare Workers Builds, utiliser :
+Dans **Workers & Pages → votre Worker → Settings / Build**, configurez exactement :
 
-- **Build command** : `npm run build`
-- **Deploy command** : `npx wrangler deploy`
-- **Root directory** : `/`
+- **Root directory** : `/` (racine du dépôt)
+- **Build command** : laissez vide, pour éviter qu’un build séparé soit nécessaire à la commande de publication
+- **Deploy command** : `npm run deploy`
+- **Preview command** : pour les builds de prévisualisation, utilisez `npm run deploy` uniquement si vous souhaitez déployer ce même Worker ; sinon configurez un flux de preview distinct.
 
-Le `wrangler.jsonc` à la racine configure une application Cloudflare **Worker avec Static Assets**. Le Worker fournit `/api/hf/*` pour le relais des fichiers de modèles ; le reste des requêtes est servi depuis `dist`. Cette configuration correspond au pipeline Wrangler signalé dans votre journal.
+Le script `npm run deploy` exécute dans cet ordre `npm run build`, vérifie que `dist/index.html` existe, puis lance `wrangler deploy`. **Ne laissez pas `npx wrangler deploy` comme Deploy command**, car cette commande seule ne lance pas Vite et échouera si `dist` n’a pas été créé par une étape précédente.
 
-En local, on peut lancer :
+Le `wrangler.jsonc` à la racine configure un Worker avec Static Assets : `worker/index.js` traite `/api/hf/*` et les autres routes sont servies depuis `dist`. Les fichiers `dist` sont produits à chaque build et ne doivent pas être ajoutés au dépôt.
+
+En local, utilisez :
 
 ```bash
 npm install
-npm run build
-npx wrangler deploy
+npm run deploy
 ```
 
-Ou utiliser le script `npm run deploy` qui effectue le build puis le déploiement. Il faut être authentifié auprès de Cloudflare et avoir accès au compte/projet ciblé. Si Cloudflare affiche encore une erreur `vite.config.js`, vérifier que le dépôt déployé contient bien `wrangler.jsonc` **et** `worker/index.js`, puis que la commande de déploiement est `npx wrangler deploy` depuis la racine.
+Pour diagnostiquer le pipeline, le log doit afficher l’exécution de `vite build` et la création de `dist/index.html` **avant** l’appel Wrangler. Si cette commande échoue, corrigez d’abord l’erreur Vite affichée ; ne lancez pas Wrangler ensuite.
 
 ### Variante si vous souhaitez rester sur Cloudflare Pages classique
 
-Le projet garde également `functions/api/hf/[[path]].js` pour Pages. Dans un véritable projet **Workers & Pages → Pages**, configurez :
-
-- **Build command** : `npm run build`
-- **Build output directory** : `dist`
-- **Root directory** : `/`
-
-Laissez Pages publier automatiquement après le build ; ne configurez pas `wrangler deploy` comme commande de publication. Pour un déploiement manuel Pages, utilisez `npm run pages:deploy` (et choisissez ou ajoutez le nom du projet Pages si Wrangler le demande). Le fichier `wrangler.pages.jsonc` sert de configuration dédiée à ce mode.
-
-**Ne mélangez pas les deux commandes** : `wrangler deploy` déploie la configuration Workers située dans `wrangler.jsonc`, tandis que `wrangler pages deploy` publie un projet Pages.
+Dans un projet **Pages** (et non Workers Builds), configurez **Build command** `npm run build`, **Build output directory** `dist`, **Root directory** `/`, puis laissez Pages effectuer la publication. Ne mélangez pas les commandes : `wrangler deploy` utilise `wrangler.jsonc` pour Workers, tandis que `wrangler pages deploy` publie un projet Pages. Le projet conserve `wrangler.pages.jsonc` et `functions/api/hf/[[path]].js` pour cette variante.
 
 ### Contrôle après publication
 

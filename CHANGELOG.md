@@ -49,3 +49,10 @@
 - Ajout d’une configuration distincte `wrangler.pages.jsonc` et d’instructions pour conserver, si nécessaire, un déploiement Pages classique.
 - Ajout du script `npm run deploy` pour construire puis lancer `wrangler deploy`, ainsi que `npm run pages:deploy` pour la variante Pages.
 - Vérifications syntaxiques JavaScript/JSON effectuées localement. La compilation complète dépend encore de l’installation des dépendances npm et doit être exécutée dans l’environnement Cloudflare.
+
+
+## Correctif déploiement — `dist` absent (2026-10-16)
+
+- Mise à jour des instructions Workers Builds : la commande de déploiement doit être `npm run deploy`, qui génère les assets avant Wrangler.
+- Ajout de `scripts/verify-dist.mjs` pour vérifier que `dist/index.html` existe avant toute publication et afficher un diagnostic explicite sinon.
+- Le dossier `dist` reste généré durant le build et n’est pas commité dans le dépôt.
