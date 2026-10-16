@@ -329,6 +329,7 @@ function App() {
   const [manual, setManual] = useState({ ...EMPTY_MANUAL });
   const [auditSnapshot, setAuditSnapshot] = useState(null);
   const [view, setView] = useState('live');
+  const [activeSection, setActiveSection] = useState('audit');
   const [notice, setNotice] = useState('');
   const [showMethodNotes, setShowMethodNotes] = useState(false);
   const [sourceMode, setSourceMode] = useState('camera');
@@ -656,6 +657,7 @@ function App() {
         width,
         height,
       });
+      setSourceMode('image');
       setEditingSampleId(null);
       setImagePredictions([]);
       setObjects([]);
@@ -1167,7 +1169,7 @@ function App() {
     if (pendingBox) {
       drawBox([pendingBox.x, pendingBox.y, pendingBox.width, pendingBox.height], CATEGORIES.find((item) => item.id === annotationCategory)?.color || '#f7db65', 'Annotation en cours', true);
     }
-  }, [selectedImage, imagePredictions, imageAnnotations, pendingBox, annotationCategory, sourceMode]);
+  }, [selectedImage, imagePredictions, imageAnnotations, pendingBox, annotationCategory, sourceMode, activeSection]);
 
   const liveRows = useMemo(
     () => makeRows(expected, counts, manual, hasObservedFrame, false, owlObserved),
@@ -1250,12 +1252,13 @@ function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <a className="brand" href="#top" onClick={() => setView('live')} aria-label="Atlas, accueil">
+      <a className="brand" href="#top" onClick={() => { setView('live'); setActiveSection('audit'); }} aria-label="Atlas, accueil">
         <span className="brand-mark"><span /><span /><span /><span /></span>
         <span className="brand-word">atlas<span>.</span><small>VISUAL AUDIT</small></span>
       </a>
       <nav className="top-nav" aria-label="Navigation principale">
-        <button className={view === 'live' ? 'nav-link active' : 'nav-link'} onClick={() => setView('live')}><Icon name="grid" size={16} /> Supervision</button>
+        <button className={view === 'live' && activeSection === 'audit' ? 'nav-link active' : 'nav-link'} onClick={() => { setView('live'); setActiveSection('audit'); }}><Icon name="grid" size={16} /> Supervision</button>
+        <button className={view === 'live' && activeSection === 'learning' ? 'nav-link active' : 'nav-link'} onClick={() => { if (cameraOn) stopCamera(); setSourceMode('image'); setAnnotationMode(false); setView('live'); setActiveSection('learning'); }}><Icon name="target" size={16} /> Apprentissage</button>
         <button className={view === 'report' ? 'nav-link active' : 'nav-link'} onClick={() => setView('report')}><Icon name="report" size={16} /> Rapport d’audit</button>
       </nav>
       <div className="topbar-right">
@@ -1268,32 +1271,71 @@ function App() {
       <section className="page-intro">
         <div className="intro-copy">
           <div className="eyebrow"><span className="eyebrow-line" /> CONTRÔLE DES ENVIRONNEMENTS</div>
-          <h1>{view === 'report' ? <>Rapport <span>d’audit.</span></> : <>L’œil juste.<br /><span>Le relevé clair.</span></>}</h1>
+          <h1>{view === 'report' ? <>Rapport <span>d’audit.</span></> : activeSection === 'learning' ? <>Apprentissage <span>manuel.</span></> : <>L’œil juste.<br /><span>Le relevé clair.</span></>}</h1>
           <p>{view === 'report'
             ? 'Confrontez le relevé visuel à la configuration attendue. Les détections non confirmées restent signalées comme telles.'
-            : 'Une supervision visuelle des équipements et du mobilier, directement dans votre navigateur. Les images restent sur votre appareil.'}</p>
-          {view === 'live' && <div className="intro-meta"><span><Icon name="target" size={16} /> 7 règles de contrôle</span><span><Icon name="shield" size={16} /> Aucune vidéo envoyée</span><span><Icon name="grid" size={16} /> Mobile & bureau</span></div>}
+            : activeSection === 'learning' ? 'Corrigez les détections en dessinant des cadres et constituez un jeu d’exemples conservé sur cet appareil.' : 'Une supervision visuelle des équipements et du mobilier, directement dans votre navigateur. Les images restent sur votre appareil.'}</p>
+          {view === 'live' && activeSection === 'audit' && <div className="intro-meta"><span><Icon name="target" size={16} /> 7 règles de contrôle</span><span><Icon name="shield" size={16} /> Aucune vidéo envoyée</span><span><Icon name="grid" size={16} /> Mobile & bureau</span></div>}
         </div>
         <div className="intro-aside">
-          <span className="aside-index">{view === 'report' ? '02 / RÉSULTATS' : '01 / SUPERVISION'}</span>
+          <span className="aside-index">{view === 'report' ? '02 / RÉSULTATS' : activeSection === 'learning' ? '03 / APPRENTISSAGE' : '01 / SUPERVISION'}</span>
           <span className="aside-rule" />
-          <p>{view === 'report' ? 'Le relevé fait foi des observations disponibles, pas d’une preuve absolue d’absence.' : 'Un outil d’aide au contrôle. Chaque écart appelle une vérification humaine.'}</p>
-          {view === 'live'
-            ? <button className="button button-dark" onClick={saveAudit}>Figer le relevé <Icon name="arrow" size={17} /></button>
-            : <button className="button button-dark" onClick={() => setView('live')}>Retour à la caméra <Icon name="arrow" size={17} /></button>}
+          <p>{view === 'report' ? 'Le relevé fait foi des observations disponibles, pas d’une preuve absolue d’absence.' : activeSection === 'learning' ? 'Les annotations enrichissent un jeu de données ; elles ne réentraînent pas immédiatement les modèles.' : 'Un outil d’aide au contrôle. Chaque écart appelle une vérification humaine.'}</p>
+          {view === 'live' && activeSection === 'learning'
+            ? <button className="button button-dark" onClick={() => setActiveSection('audit')}>Retour à la supervision <Icon name="arrow" size={17} /></button>
+            : view === 'live'
+              ? <button className="button button-dark" onClick={saveAudit}>Figer le relevé <Icon name="arrow" size={17} /></button>
+              : <button className="button button-dark" onClick={() => { setView('live'); setActiveSection('audit'); }}>Retour à la caméra <Icon name="arrow" size={17} /></button>}
         </div>
       </section>
 
       {notice && <div className="notice-strip" role="status"><Icon name="info" size={17} /><span>{notice}</span><button onClick={() => setNotice('')} aria-label="Fermer le message"><Icon name="close" size={16} /></button></div>}
 
-      <section className="stats-grid" aria-label="Indicateurs de l’audit">
+      {!(view === 'live' && activeSection === 'learning') && <section className="stats-grid" aria-label="Indicateurs de l’audit">
         <StatCard label="Objets relevés" value={pageSummary.total} detail={verifiedDescription} icon="target" />
         <StatCard label="Catégories reconnues" value={`${pageSummary.recognized} / 7`} detail="Catégories avec au moins une occurrence" icon="grid" />
         <StatCard label="Règles configurées" value={`${pageSummary.configured} / 7`} detail={`${pageSummary.checked} règle(s) déjà renseignée(s)`} icon="check" />
         <StatCard label="Écarts observés" value={pageSummary.deviations} detail={pageSummary.unresolved ? `${pageSummary.unresolved} contrôle(s) à confirmer` : 'Aucun contrôle en attente'} icon="alert" tone={pageSummary.deviations > 0 ? 'stat-card-alert' : ''} />
-      </section>
+      </section>}
 
-      {view === 'live' ? <>
+      {view === 'live' ? (activeSection === 'learning' ? <>
+        <section className="panel learning-panel">
+          <div className="panel-heading learning-heading">
+            <div><div className="section-kicker">ANNOTATION & APPRENTISSAGE SUPERVISÉ</div><h2>Apprendre à partir de corrections humaines</h2></div>
+            <span className="training-count">{trainingSamples.length} exemple(s) local(aux)</span>
+          </div>
+          <p className="panel-subtitle">Importez une image, choisissez une catégorie, puis dessinez un cadre autour de chaque objet. Annotez en priorité les fenêtres, tableaux et bureaux manqués, ainsi que les détections incorrectes. Les annotations constituent un jeu de données : elles ne réentraînent pas instantanément COCO-SSD.</p>
+          <div className="annotation-toolbar">
+            <input ref={fileInputRef} className="visually-hidden-input" type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageUpload} />
+            <button className="button button-secondary" onClick={() => { setSourceMode('image'); fileInputRef.current?.click(); }}><Icon name="download" size={16} /> Importer une image</button>
+            <label className="annotation-select-label" htmlFor="annotation-category">Catégorie à annoter</label>
+            <select id="annotation-category" value={annotationCategory} onChange={(event) => setAnnotationCategory(event.target.value)}>
+              {LEARNABLE_CATEGORIES.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+            </select>
+            <button className={annotationMode ? 'button button-primary' : 'button button-secondary'} disabled={!selectedImage || sourceMode !== 'image'} onClick={() => { setAnnotationMode((value) => !value); setPendingBox(null); }}><Icon name="target" size={16} />{annotationMode ? 'Terminer l’annotation' : 'Dessiner des cadres'}</button>
+            <button className="button button-secondary" onClick={saveCurrentSample} disabled={!selectedImage || imageAnnotations.length === 0 || datasetBusy}><Icon name="check" size={16} />{editingSampleId ? 'Mettre à jour l’exemple' : 'Enregistrer l’exemple'}</button>
+          </div>
+          {sourceMode === 'image' && selectedImage && <div className="fixed-image-stage learning-image-stage" style={{ aspectRatio: `${selectedImage.width} / ${selectedImage.height}` }}>
+            <img ref={fixedImageRef} src={selectedImage.dataUrl} alt="Image importée pour annotation manuelle" />
+            <canvas ref={fixedImageCanvasRef} className={`fixed-image-canvas ${annotationMode ? 'is-annotating' : ''}`} onPointerDown={beginAnnotation} onPointerMove={moveAnnotation} onPointerUp={finishAnnotation} onPointerCancel={finishAnnotation} aria-label="Image avec cadres de détection et d’annotation" />
+            <span className="image-detection-badge">{imageAnalyzed ? `${imagePredictions.length} détection(s) IA` : 'Annotation manuelle'}</span>
+          </div>}
+          {sourceMode !== 'image' || !selectedImage ? <div className="annotation-empty"><Icon name="info" size={18} /><span>Importez une photo avec le bouton ci-dessus pour commencer à dessiner des cadres.</span></div> : <>
+            <div className={`annotation-hint ${annotationMode ? 'annotation-hint-active' : ''}`}><span className="hint-dot" />{annotationMode ? 'Mode dessin actif : faites glisser le doigt ou la souris sur l’image pour encadrer un objet.' : 'Choisissez une catégorie puis activez « Dessiner des cadres ». Les cadres manuels sont en pointillés.'}</div>
+            {imageAnnotations.length > 0 ? <div className="annotation-list"><span className="annotation-list-title">Annotations non enregistrées ({imageAnnotations.length})</span>{imageAnnotations.map((annotation, index) => <div className="annotation-chip" key={annotation.id}><span className="annotation-color" style={{ background: annotation.color }} /><span>{index + 1}. {annotation.label}</span><small>{annotation.bbox.map((value) => Math.round(value)).join(' · ')}</small><button className="icon-button" onClick={() => setImageAnnotations((previous) => previous.filter((item) => item.id !== annotation.id))} aria-label={`Supprimer annotation ${index + 1}`}><Icon name="close" size={14} /></button></div>)}</div> : <p className="annotation-empty-text">Aucun cadre manuel pour cette image pour le moment.</p>}
+          </>}
+          <div className="dataset-controls">
+            <div className="dataset-description"><strong>Jeu de données d’apprentissage</strong><span>Conservé dans IndexedDB sur cet appareil. Exportez régulièrement une copie de sauvegarde avant de changer de navigateur ou d’effacer ses données.</span></div>
+            <div className="dataset-actions">
+              <input ref={datasetInputRef} className="visually-hidden-input" type="file" accept="application/json,.json" onChange={importTrainingDataset} />
+              <button className="button button-secondary" onClick={() => datasetInputRef.current?.click()} disabled={datasetBusy}>Importer un jeu</button>
+              <button className="button button-primary" onClick={exportTrainingDataset} disabled={trainingSamples.length === 0 || datasetBusy}><Icon name="download" size={16} /> Exporter annotations + images</button>
+            </div>
+          </div>
+          {trainingSamples.length > 0 && <div className="saved-samples-list">{trainingSamples.slice(0, 5).map((sample) => <div className="saved-sample-row" key={sample.id}><span className="saved-sample-thumb"><img src={sample.dataUrl} alt="" /></span><span className="saved-sample-name"><strong>{sample.name}</strong><small>{sample.annotations.length} annotation(s) · {new Date(sample.createdAt).toLocaleDateString('fr-FR')}</small></span><div className="saved-sample-actions"><button className="text-button" onClick={() => editSample(sample)}>Modifier</button><button className="text-button remove-sample" onClick={() => deleteSample(sample.id)}>Supprimer</button></div></div>)}{trainingSamples.length > 5 && <p className="dataset-more">+ {trainingSamples.length - 5} autre(s) exemple(s) enregistré(s)</p>}</div>}
+          <div className="faster-rcnn-note"><span className="note-icon"><Icon name="target" size={17} /></span><p><strong>Étape d’entraînement recommandée : Faster R-CNN.</strong><br />Le ZIP inclut un pipeline Python pour extraire ces annotations au format COCO et préparer le jeu d’images. L’entraînement Faster R-CNN s’effectue sur une machine équipée de TensorFlow Object Detection API ; le modèle entraîné doit ensuite être converti et validé pour l’inférence web. Cette séparation évite de prétendre que COCO-SSD apprend dans la page.</p></div>
+        </section>
+      </> : <>
         <section className="workspace-grid">
           <article className="panel camera-panel">
             <div className="panel-heading">
@@ -1428,96 +1470,53 @@ function App() {
             </>}
           </article>
 
-          <aside className="panel detections-panel">
-            <div className="panel-heading detections-heading">
-              <div><div className="section-kicker">LECTURE DU MODÈLE</div><h2>Objets en vue</h2></div>
-              <span className="count-orb">{hasObservedFrame ? currentTotal : '—'}</span>
-            </div>
-            <p className="panel-subtitle">Comptage des objets visibles dans la dernière image traitée, pas un inventaire garanti de toute la pièce.</p>
-            <div className="category-count-list">
-              {CATEGORIES.map((category) => {
-                const owlCategoryChecked = owlObserved && OWL_CATEGORY_IDS.has(category.id);
-                const machineCount = category.method === 'auto' || owlCategoryChecked;
-                const count = machineCount
-                  ? (hasObservedFrame ? (counts[category.id] ?? 0) : null)
-                  : getValue(manual[category.id]);
-                const sourceLabel = category.method === 'auto' ? (owlObserved && category.id === 'table' ? 'COCO-SSD + OWL-ViT' : 'COCO-SSD') : owlCategoryChecked ? 'OWL-ViT · à confirmer' : 'Relevé manuel';
-                return <div className="category-count-row" key={category.id}>
-                  <CategoryIcon category={category} />
-                  <div className="category-count-info"><span>{category.label}</span><small>{sourceLabel}</small></div>
-                  <span className={`category-count-value ${count > 0 ? 'has-count' : ''}`}>{count === null ? '—' : count}</span>
-                </div>;
-              })}
-            </div>
-            <div className="detected-objects-block">
-              <div className="subsection-heading"><span>Détections individuelles</span><span>{objects.length} résultat(s)</span></div>
-              <div className="object-list" aria-live="polite">
-                {objects.length === 0 ? <div className="empty-objects"><span className="empty-ring"><Icon name="target" size={20} /></span><strong>{hasObservedFrame ? 'Aucun équipement reconnu' : 'En attente d’une image'}</strong><span>{hasObservedFrame ? 'Cela ne prouve pas que les équipements sont absents.' : 'Démarrez la caméra pour lancer la détection.'}</span></div> : objects.map((object, index) => <div className="object-row" key={object.id}>
-                  <span className="object-index">{String(index + 1).padStart(2, '0')}</span>
-                  <span className="object-mark" style={{ background: object.color }} />
-                  <div className="object-info"><strong>{object.label}</strong><small>Objet {index + 1}{object.source ? ` · ${object.source}` : ''}</small></div>
-                  <span className="confidence-score">{Math.round(object.score * 100)}%</span>
-                </div>)}
-              </div>
-            </div>
-            <div className="model-note"><span className="note-icon"><Icon name="shield" size={17} /></span><p><strong>Sorties limitées aux équipements</strong><br />Les résultats hors des quatre classes suivies ne sont pas affichés ni conservés par l’application.</p></div>
-          </aside>
-        </section>
-
-        <section className="panel learning-panel">
-          <div className="panel-heading learning-heading">
-            <div><div className="section-kicker">ANNOTATION & APPRENTISSAGE SUPERVISÉ</div><h2>Apprendre à partir de corrections humaines</h2></div>
-            <span className="training-count">{trainingSamples.length} exemple(s) local(aux)</span>
+        <aside className="panel audit-overview-panel">
+          <div className="panel-heading overview-heading">
+            <div><div className="section-kicker">RÈGLES & RELEVÉ</div><h2>Configuration initiale & objets en vue</h2></div>
+            <span className="count-orb overview-count">{hasObservedFrame ? currentTotal : '—'}</span>
           </div>
-          <p className="panel-subtitle">Importez une image, choisissez une catégorie, puis dessinez un cadre autour de chaque objet. Annotez en priorité les fenêtres, tableaux et bureaux manqués, ainsi que les détections incorrectes. Les annotations constituent un jeu de données : elles ne réentraînent pas instantanément COCO-SSD.</p>
-          <div className="annotation-toolbar">
-            <label className="annotation-select-label" htmlFor="annotation-category">Catégorie à annoter</label>
-            <select id="annotation-category" value={annotationCategory} onChange={(event) => setAnnotationCategory(event.target.value)}>
-              {LEARNABLE_CATEGORIES.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
-            </select>
-            <button className={annotationMode ? 'button button-primary' : 'button button-secondary'} disabled={!selectedImage || sourceMode !== 'image'} onClick={() => { setAnnotationMode((value) => !value); setPendingBox(null); }}><Icon name="target" size={16} />{annotationMode ? 'Terminer l’annotation' : 'Dessiner des cadres'}</button>
-            <button className="button button-secondary" onClick={saveCurrentSample} disabled={!selectedImage || imageAnnotations.length === 0 || datasetBusy}><Icon name="check" size={16} />{editingSampleId ? 'Mettre à jour l’exemple' : 'Enregistrer l’exemple'}</button>
+          <p className="panel-subtitle">Définissez les quantités attendues et comparez-les aux objets relevés dans la dernière image traitée.</p>
+          <div className="compact-count-head"><span>Catégorie</span><span>Attendu</span><span>Vu / relevé</span></div>
+          <div className="compact-count-list">
+            {CATEGORIES.map((category) => {
+              const owlCategoryChecked = owlObserved && OWL_CATEGORY_IDS.has(category.id);
+              const machineCount = category.method === 'auto' || owlCategoryChecked;
+              const count = machineCount ? (hasObservedFrame ? (counts[category.id] ?? 0) : null) : getValue(manual[category.id]);
+              const sourceLabel = category.method === 'auto' ? (owlObserved && category.id === 'table' ? 'COCO + OWL-ViT' : 'COCO-SSD') : owlCategoryChecked ? 'OWL-ViT · à confirmer' : 'Manuel';
+              return <div className="compact-count-row" key={category.id}>
+                <div className="compact-category">
+                  <CategoryIcon category={category} size={18} />
+                  <div><strong>{category.label}</strong><small>{sourceLabel}</small></div>
+                </div>
+                <label className="compact-number-field">
+                  <span className="sr-only">Nombre attendu : {category.label}</span>
+                  <input type="number" inputMode="numeric" min="0" step="1" value={expected[category.id]} onChange={(event) => updateExpected(category.id, event.target.value)} aria-label={`Nombre attendu : ${category.label}`} />
+                </label>
+                {machineCount ? <div className={`compact-observed ${count > 0 ? 'has-count' : ''}`} aria-label={`Nombre détecté : ${category.label}`}><strong>{count === null ? '—' : count}</strong></div> : <label className="compact-number-field compact-manual-field">
+                  <span className="sr-only">Relevé manuel : {category.label}</span>
+                  <input type="number" inputMode="numeric" min="0" step="1" placeholder="—" value={manual[category.id]} onChange={(event) => updateManual(category.id, event.target.value)} aria-label={`Relevé manuel : ${category.label}`} />
+                </label>}
+              </div>;
+            })}
           </div>
-          {sourceMode !== 'image' || !selectedImage ? <div className="annotation-empty"><Icon name="info" size={18} /><span>Sélectionnez <strong>Image téléchargée</strong> et importez une photo pour activer le dessin des cadres.</span></div> : <>
-            <div className={`annotation-hint ${annotationMode ? 'annotation-hint-active' : ''}`}><span className="hint-dot" />{annotationMode ? 'Mode dessin actif : faites glisser le doigt ou la souris sur l’image pour encadrer un objet.' : 'Choisissez une catégorie puis activez « Dessiner des cadres ». Les cadres manuels sont en pointillés.'}</div>
-            {imageAnnotations.length > 0 ? <div className="annotation-list"><span className="annotation-list-title">Annotations non enregistrées ({imageAnnotations.length})</span>{imageAnnotations.map((annotation, index) => <div className="annotation-chip" key={annotation.id}><span className="annotation-color" style={{ background: annotation.color }} /><span>{index + 1}. {annotation.label}</span><small>{annotation.bbox.map((value) => Math.round(value)).join(' · ')}</small><button className="icon-button" onClick={() => setImageAnnotations((previous) => previous.filter((item) => item.id !== annotation.id))} aria-label={`Supprimer annotation ${index + 1}`}><Icon name="close" size={14} /></button></div>)}</div> : <p className="annotation-empty-text">Aucun cadre manuel pour cette image pour le moment.</p>}
-          </>}
-          <div className="dataset-controls">
-            <div className="dataset-description"><strong>Jeu de données d’apprentissage</strong><span>Conservé dans IndexedDB sur cet appareil. Exportez régulièrement une copie de sauvegarde avant de changer de navigateur ou d’effacer ses données.</span></div>
-            <div className="dataset-actions">
-              <input ref={datasetInputRef} className="visually-hidden-input" type="file" accept="application/json,.json" onChange={importTrainingDataset} />
-              <button className="button button-secondary" onClick={() => datasetInputRef.current?.click()} disabled={datasetBusy}>Importer un jeu</button>
-              <button className="button button-primary" onClick={exportTrainingDataset} disabled={trainingSamples.length === 0 || datasetBusy}><Icon name="download" size={16} /> Exporter annotations + images</button>
-            </div>
-          </div>
-          {trainingSamples.length > 0 && <div className="saved-samples-list">{trainingSamples.slice(0, 5).map((sample) => <div className="saved-sample-row" key={sample.id}><span className="saved-sample-thumb"><img src={sample.dataUrl} alt="" /></span><span className="saved-sample-name"><strong>{sample.name}</strong><small>{sample.annotations.length} annotation(s) · {new Date(sample.createdAt).toLocaleDateString('fr-FR')}</small></span><div className="saved-sample-actions"><button className="text-button" onClick={() => editSample(sample)}>Modifier</button><button className="text-button remove-sample" onClick={() => deleteSample(sample.id)}>Supprimer</button></div></div>)}{trainingSamples.length > 5 && <p className="dataset-more">+ {trainingSamples.length - 5} autre(s) exemple(s) enregistré(s)</p>}</div>}
-          <div className="faster-rcnn-note"><span className="note-icon"><Icon name="target" size={17} /></span><p><strong>Étape d’entraînement recommandée : Faster R-CNN.</strong><br />Le ZIP inclut un pipeline Python pour extraire ces annotations au format COCO et préparer le jeu d’images. L’entraînement Faster R-CNN s’effectue sur une machine équipée de TensorFlow Object Detection API ; le modèle entraîné doit ensuite être converti et validé pour l’inférence web. Cette séparation évite de prétendre que COCO-SSD apprend dans la page.</p></div>
-        </section>
-
-        <section className="panel audit-config-panel">
-          <div className="panel-heading config-heading">
-            <div><div className="section-kicker">RÈGLES & RELEVÉ HUMAIN</div><h2>Configuration initiale</h2></div>
-            <span className="sample-config-label">Valeurs d’exemple · modifiables</span>
-          </div>
-          <p className="panel-subtitle config-intro">Renseignez les quantités attendues avant le contrôle. Pour les fenêtres, tableaux et anomalies, indiquez manuellement ce que vous observez ; une case vide signifie « non relevé », pas zéro.</p>
-          <div className="config-table-wrap">
-            <table className="config-table">
-              <thead><tr><th>Catégorie</th><th>Mode de vérification</th><th>Nombre attendu</th><th>Relevé manuel</th><th>Observation</th></tr></thead>
-              <tbody>{CATEGORIES.map((category) => <tr key={category.id}>
-                <td><div className="table-category"><CategoryIcon category={category} size={18} /><span>{category.label}</span></div></td>
-                <td><span className={`method-tag ${category.method}`}>{category.method === 'auto' ? (category.id === 'table' ? 'IA · COCO-SSD / OWL-ViT' : 'IA · COCO-SSD') : (OWL_CATEGORY_IDS.has(category.id) ? 'OWL-ViT optionnel / humain' : 'Contrôle humain')}</span></td>
-                <td><label className="number-input"><input type="number" inputMode="numeric" min="0" step="1" value={expected[category.id]} onChange={(event) => updateExpected(category.id, event.target.value)} aria-label={`Nombre attendu : ${category.label}`} /><span>obj.</span></label></td>
-                <td>{category.method === 'manual' ? <label className="number-input manual-number"><input type="number" inputMode="numeric" min="0" step="1" placeholder="—" value={manual[category.id]} onChange={(event) => updateManual(category.id, event.target.value)} aria-label={`Relevé manuel : ${category.label}`} /><span>obj.</span></label> : <span className="not-applicable">Auto</span>}</td>
-                <td><span className="table-detail">{category.detail}</span></td>
-              </tr>)}</tbody>
-            </table>
-          </div>
-          <div className="config-footer">
+          <div className="compact-note">Les tirets indiquent qu’aucun relevé automatique n’est disponible. Une non-détection ne prouve pas l’absence d’un objet.</div>
+          <div className="config-footer overview-footer">
             <button className="text-button reset-button" onClick={() => { setExpected({ ...INITIAL_EXPECTED }); setManual({ ...EMPTY_MANUAL }); setNotice('Configuration d’exemple restaurée. Vérifiez les quantités avant usage.'); }}><Icon name="refresh" size={15} /> Restaurer l’exemple</button>
-            <button className="button button-primary" onClick={saveAudit}>Figer le relevé & ouvrir le rapport <Icon name="arrow" size={17} /></button>
+            <button className="button button-primary" onClick={saveAudit}>Figer le relevé <Icon name="arrow" size={16} /></button>
           </div>
+          <div className="detected-objects-block overview-detected-block">
+            <div className="subsection-heading"><span>Détections individuelles</span><span>{objects.length} résultat(s)</span></div>
+            <div className="object-list" aria-live="polite">
+              {objects.length === 0 ? <div className="empty-objects compact-empty"><span className="empty-ring"><Icon name="target" size={19} /></span><strong>{hasObservedFrame ? 'Aucun équipement reconnu' : 'En attente d’une image'}</strong><span>{hasObservedFrame ? 'Cela ne prouve pas que les équipements sont absents.' : 'Démarrez la caméra ou importez une image.'}</span></div> : objects.map((object, index) => <div className="object-row" key={object.id}>
+                <span className="object-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="object-mark" style={{ background: object.color }} />
+                <div className="object-info"><strong>{object.label}</strong><small>Objet {index + 1}{object.source ? ` · ${object.source}` : ''}</small></div>
+                <span className="confidence-score">{Math.round(object.score * 100)}%</span>
+              </div>)}
+            </div>
+          </div>
+        </aside>
         </section>
-
         <section className="method-strip">
           <div className="method-strip-icon"><Icon name="info" size={20} /></div>
           <div><h3>À propos de la méthode</h3><p>COCO-SSD reste actif en caméra. Sur une image fixe, OWL-ViT peut proposer en zéro-shot des cadres pour tableaux, fenêtres et bureaux. Ce n’est pas un entraînement local : vérifiez les résultats et annotez les erreurs.</p></div>
@@ -1529,7 +1528,7 @@ function App() {
           <p><strong>Personnes :</strong> l’interface ne présente, n’enregistre et n’exporte pas les sorties « person », et ne fait aucune identification. Cependant, COCO-SSD reste un modèle généraliste multi-classes : filtrer ses sorties n'est pas la preuve qu'aucun calcul interne relatif à une personne n'a lieu. Pour une exigence stricte, cadre la caméra uniquement sur les équipements, suspends la détection si quelqu’un entre dans le champ et remplace le modèle générique par un détecteur spécialisé limité aux classes d’équipement.</p>
           <p><strong>Annotations :</strong> les cadres manuels sont stockés en local et exportables avec leurs images pour entraîner un modèle spécialisé. Ils n’altèrent pas directement les poids de COCO-SSD.</p><p><strong>Faster R-CNN :</strong> le pipeline fourni prépare un jeu de données COCO pour un entraînement hors navigateur. Il faut exporter, convertir et valider un modèle spécialisé avant de le brancher comme moteur d’inférence web.</p>
         </section>}
-      </> : <>
+      </>) : <>
         <section className="report-heading panel">
           <div className="report-heading-main"><div className="report-emblem"><Icon name="report" size={25} /></div><div><div className="section-kicker">SYNTHÈSE DE VÉRIFICATION</div><h2>Rapport d’audit visuel</h2><p>{auditSnapshot ? `Relevé enregistré le ${formatDate(auditSnapshot.createdAt)} · ${auditSnapshot.source || 'source non précisée'}.` : 'Aucun relevé figé. Ce rapport est une prévisualisation des données actuellement disponibles.'}</p></div></div>
           <div className="report-actions"><button className="button button-secondary" onClick={exportJson}><Icon name="download" size={17} /> Exporter JSON</button><button className="button button-primary" onClick={() => window.print()}><Icon name="report" size={17} /> Imprimer / PDF</button></div>
@@ -1558,10 +1557,10 @@ function App() {
           <article className="panel report-note-card"><span className="report-note-icon"><Icon name="shield" size={19} /></span><div><h3>Lecture prudente des résultats</h3><p>Une détection ne vaut pas inventaire exhaustif. Vérifiez les écarts et les objets potentiellement masqués, petits, éloignés ou hors champ avant de conclure.</p></div></article>
           <article className="panel report-note-card"><span className="report-note-icon"><Icon name="lock" size={19} /></span><div><h3>Confidentialité du relevé</h3><p>Le rapport contient les nombres et statuts uniquement. Aucune photo ou vidéo de caméra n’y est intégrée ni envoyée au serveur.</p></div></article>
         </section>
-        <div className="report-bottom-actions"><button className="button button-secondary" onClick={() => setView('live')}><Icon name="arrow" size={17} /> Retour à la supervision</button><button className="text-button" onClick={saveAudit}><Icon name="refresh" size={15} /> Figer un nouveau relevé</button></div>
+        <div className="report-bottom-actions"><button className="button button-secondary" onClick={() => { setView('live'); setActiveSection('audit'); }}><Icon name="arrow" size={17} /> Retour à la supervision</button><button className="text-button" onClick={saveAudit}><Icon name="refresh" size={15} /> Figer un nouveau relevé</button></div>
       </>}
 
-      <footer className="site-footer"><a className="footer-brand" href="#top" onClick={() => setView('live')}>atlas<span>.</span></a><span>Audit visuel d’équipements · Version de démonstration</span><span className="footer-local"><span /> Traitement dans le navigateur</span></footer>
+      <footer className="site-footer"><a className="footer-brand" href="#top" onClick={() => { setView('live'); setActiveSection('audit'); }}>atlas<span>.</span></a><span>Audit visuel d’équipements · Version de démonstration</span><span className="footer-local"><span /> Traitement dans le navigateur</span></footer>
     </main>
   </div>;
 }

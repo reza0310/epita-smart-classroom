@@ -24,3 +24,11 @@
 - Copie au lancement/build des fichiers WASM d'ONNX Runtime vers `public/ort/`; configuration de `wasmPaths` sur la même origine au lieu d'un CDN tiers.
 - Ajout d'un endpoint de diagnostic `/api/hf/_health` et de messages d'erreur indiquant de vérifier les Pages Functions et les fichiers WASM locaux.
 - Le build et le test navigateur complet restent à exécuter après `npm install` dans un environnement disposant du registre npm.
+
+
+## Interface — organisation simplifiée
+
+- Déplacement de l’annotation manuelle dans un onglet dédié « Apprentissage ».
+- Ajout d’un bouton d’import d’image directement dans l’onglet d’apprentissage.
+- Fusion de la configuration initiale et des objets en vue dans un panneau compact, par catégorie : attendu, détecté ou relevé manuellement.
+- Réduction de l’encombrement des indicateurs lors de l’annotation et ajustements responsive pour mobile.

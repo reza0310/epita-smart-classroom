@@ -96,3 +96,12 @@ Les images annotées résident dans IndexedDB sur l'appareil. L'export inclut le
 ## Journal des modifications
 
 Voir [`CHANGELOG.md`](CHANGELOG.md) pour les correctifs et les vérifications de cette version.
+
+
+## Interface update — organisation simplifiée
+
+- Navigation séparée entre **Supervision**, **Apprentissage** et **Rapport d’audit**.
+- L’apprentissage manuel dispose de son propre onglet et conserve l’import d’image, le dessin des cadres, les exemples enregistrés ainsi que l’import/export du jeu de données.
+- Le panneau **Configuration initiale & objets en vue** regroupe les quantités attendues, les relevés manuels, les comptages issus des modèles et la liste des détections individuelles.
+- Les indicateurs généraux sont masqués dans l’onglet d’apprentissage pour réduire les distractions.
+- Les contrôles s’adaptent aux écrans étroits ; les valeurs non relevées restent représentées par un tiret et ne sont pas converties automatiquement en absence.
